@@ -5,7 +5,6 @@ use std::{io::{Read, Write}, path::PathBuf, sync::{mpsc::{self, Receiver}, Arc, 
 const REPOSITORY: &str = crate::brand::REPOSITORY;
 const API: &str = crate::brand::RELEASE_API;
 const RELEASES: &str = crate::brand::RELEASES;
-const BACKUP_DOWNLOAD: &str = RELEASES;
 
 #[derive(Clone, Debug)]
 struct Release { version: String, notes: String, page: String, package: Option<Package> }
@@ -209,8 +208,6 @@ impl State {
                         }
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
-                            ui.hyperlink_to(egui::RichText::new("飞书备用下载").size(11.5).color(theme::BLUE),BACKUP_DOWNLOAD);
-                            ui.label(egui::RichText::new("·").color(theme::DIM));
                             ui.hyperlink_to(egui::RichText::new("浏览器下载").size(11.5).color(theme::GRAY),&release.page);
                             ui.label(egui::RichText::new("·").color(theme::DIM));
                             ui.hyperlink_to(egui::RichText::new("查看发布说明").size(11.5).color(theme::GRAY),&release.page);
@@ -309,7 +306,7 @@ fn download(release: &Release, tx: &mpsc::Sender<Event>, cancel: &AtomicBool) ->
     std::fs::create_dir_all(&work).map_err(|_| "无法创建更新缓存")?;
     let result = (|| {
         let response = http_agent()?
-            .get(&package.url).call().map_err(|_| "连接下载服务器失败，请检查网络或代理，或使用飞书备用下载")?;
+            .get(&package.url).call().map_err(|_| "连接下载服务器失败，请检查网络或代理，或使用浏览器下载")?;
         if !response.get_url().starts_with("https://") { return Err("更新下载未使用安全连接".into()); }
         let mut input = response.into_reader();
         let mut output = std::fs::File::create(work.join("update.zip")).map_err(|_| "无法保存更新包")?;
@@ -329,7 +326,7 @@ fn transfer(input: &mut impl Read, output: &mut impl Write, package: &Package, c
     let mut buffer = [0u8; 65536]; let mut total = 0u64;
     loop {
         if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
-        let length = input.read(&mut buffer).map_err(|_| "下载中断或等待超时，请重试或使用飞书备用下载")?;
+        let length = input.read(&mut buffer).map_err(|_| "下载中断或等待超时，请重试或使用浏览器下载")?;
         if length == 0 { break; }
         total += length as u64;
         if total > package.size { return Err("更新包大小不符，请重新下载".into()); }
@@ -563,7 +560,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = crate::app::App::new(&ctx, Default::default());
         app.updates.result = Some(Ok(Some(Release { version: "v0.6.50".into(),
-            notes: "- 更新下载支持 Windows 系统代理\n- 连接失败及时提示，避免长时间停在 0%\n- 新增飞书备用下载入口".into(), page: RELEASES.into(),
+            notes: "- 更新下载支持 Windows 系统代理\n- 连接失败及时提示，避免长时间停在 0%\n- 下载失败时可改用浏览器下载".into(), page: RELEASES.into(),
             package: Some(Package { url: String::new(), size: 100, hash: String::new() }) })));
         app.updates.dialog_open = true;
         app.settings_tab = 9;
@@ -587,7 +584,7 @@ mod tests {
             ("update-dialog", None, ""),
             ("update-connecting", Some(0.0), ""),
             ("update-downloading", Some(0.42), ""),
-            ("update-failed", None, "连接下载服务器失败，请检查网络或代理，或使用飞书备用下载"),
+            ("update-failed", None, "连接下载服务器失败，请检查网络或代理，或使用浏览器下载"),
         ] {
         app.updates.cancel = progress.map(|_| Arc::new(AtomicBool::new(false)));
         app.updates.progress = progress.unwrap_or_default();

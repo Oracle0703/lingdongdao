@@ -536,7 +536,7 @@ fn web_video_is_hidden_without_changing_music_preferences(){
     h.app.ly.lyrics=Some(crate::lyrics::parse_lrc("[00:01.00]previous song"));
     h.app.ly.error=Some(crate::lyrics::FetchError::Unavailable("503".into()));
     let (tx,rx)=std::sync::mpsc::channel();h.app.ly.rx=Some(rx);
-    h.media=crate::smtc::NowPlaying{title:"小唐的Token的抖音 - 抖音".into(),playing:true,duration:17.0,..Default::default()};
+    h.media=crate::smtc::NowPlaying{title:"示例账号的抖音 - 抖音".into(),playing:true,duration:17.0,..Default::default()};
     h.frame(vec![]);
     assert!(h.app.media.title.is_empty() && !h.app.media.playing,"视频标题和播放状态不应进入岛内音乐页面");
     assert!(h.app.ly.key.is_empty(),"视频不应建立歌曲取词任务");
@@ -559,7 +559,7 @@ fn web_video_is_hidden_without_changing_music_preferences(){
 fn web_video_does_not_override_the_minimal_island(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();h.app.settings.minimal=true;
-    h.media=crate::smtc::NowPlaying{title:"小唐的Token的抖音 - 抖音".into(),playing:true,duration:17.0,..Default::default()};
+    h.media=crate::smtc::NowPlaying{title:"示例账号的抖音 - 抖音".into(),playing:true,duration:17.0,..Default::default()};
     for _ in 0..90 {h.frame(vec![]);}
     assert!(h.region.height()<20.0,"视频不能触发歌曲专用的收起态");
 }
@@ -3670,46 +3670,6 @@ fn settings_theme_follows_system_and_preserves_island_style() {
         }
     }
 }
-
-#[test]
-#[ignore = "按需导出关于页支持作者预览"]
-fn about_support_preview() {
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_SUPPORT_PREVIEW_DIR").expect("需指定预览目录"));
-    std::fs::create_dir_all(&dest).unwrap();
-    let mut h=H::new();h.app.open_settings();h.app.settings_tab=9;h.ctx.set_embed_viewports(false);
-    let output=std::sync::Arc::new(std::sync::Mutex::new(None));let capture=output.clone();
-    egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
-        let id=viewport.ids.this;
-        let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,560.0))),
-            viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()};
-        *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
-    });
-    let mut raster=crate::preview_raster::Raster::new(690,560);
-    for dark in [true,false] { for open in [false,true] {
-        h.app.settings.settings_theme=if dark{crate::settings_theme::SettingsTheme::Dark}else{crate::settings_theme::SettingsTheme::Light};
-        h.ctx.data_mut(|data|data.insert_temp(egui::Id::new("support-author-open"),open));
-        for frame in 0..4 {
-            let root=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
-            let child=output.lock().unwrap().take().unwrap();
-            raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);
-            if frame==3 {
-                let has_wechat=child.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()=="微信支付"));
-                assert_eq!(has_wechat,open);
-                for label in [if open{"返回"}else{"请喝咖啡 · 支持作者"},"完全自愿 · 感谢每一份支持 · 不影响功能使用"] {
-                    let shape=child.shapes.iter().find(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()==label)).expect("按钮和说明必须可见");
-                    assert!(shape.clip_rect.contains_rect(shape.shape.visual_bounding_rect()),"默认窗口中内容不能被裁切：{label}");
-                }
-                raster.buf.fill([0.0,0.0,0.0,1.0]);
-                raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
-                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
-                image::save_buffer(dest.join(format!("about-{}-{}.png",if dark{"dark"}else{"light"},if open{"open"}else{"closed"})),&rgba,690,560,image::ColorType::Rgba8).unwrap();
-            }
-            raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
-        }
-    } }
-}
-
 
 #[test]
 fn mail_report_open_settings_matrix() {
