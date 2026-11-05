@@ -7,12 +7,14 @@
 
 Windows 桌面伙伴 · 音乐与歌词 · 邮件验证码 · 日程提醒 · AI 额度
 
-[![Release](https://img.shields.io/github/v/release/Renly1994/xiaotang-daozai?color=6d65ff&label=下载)](https://github.com/Renly1994/xiaotang-daozai/releases/latest)
+本仓库是基于 [原版岛仔](https://github.com/Renly1994/xiaotang-daozai) 的独立二次开发，保留 MIT 及第三方许可。界面名称暂沿用“岛仔”，系统标识为 `DaozaiFork`，使用独立数据和凭据。安装快捷方式带有分支标识，可与原版区分。
+
+[![Release](https://img.shields.io/github/v/release/Oracle0703/lingdongdao?color=6d65ff&label=下载)](https://github.com/Oracle0703/lingdongdao/releases/latest)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4)](#安装与更新)
 [![License](https://img.shields.io/badge/License-MIT-3cbf91)](LICENSE)
-[![CI](https://github.com/Renly1994/xiaotang-daozai/actions/workflows/ci.yml/badge.svg)](https://github.com/Renly1994/xiaotang-daozai/actions/workflows/ci.yml)
+[![CI](https://github.com/Oracle0703/lingdongdao/actions/workflows/ci.yml/badge.svg)](https://github.com/Oracle0703/lingdongdao/actions/workflows/ci.yml)
 
-[下载 Windows 版](https://github.com/Renly1994/xiaotang-daozai/releases/latest) · [使用指南](docs/USAGE.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Renly1994/xiaotang-daozai/issues)
+[下载 Windows 版](https://github.com/Oracle0703/lingdongdao/releases/latest) · [使用指南](docs/USAGE.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Oracle0703/lingdongdao/issues)
 
 </div>
 
@@ -65,7 +67,9 @@ Windows 桌面伙伴 · 音乐与歌词 · 邮件验证码 · 日程提醒 · AI
 
 ## 安装与更新
 
-1. 前往 [Releases](https://github.com/Renly1994/xiaotang-daozai/releases/latest)，下载安装版 `Daozai-Setup-v0.6.50-x64.exe`。
+本分支仅从 [Oracle0703/lingdongdao 发布页](https://github.com/Oracle0703/lingdongdao/releases) 获取更新。首次正式发布前，请按下方说明从源码构建；应用会提示暂无正式版本，不会回退下载原版。
+
+1. 前往 [Releases](https://github.com/Oracle0703/lingdongdao/releases/latest)，下载安装版 `Daozai-Setup-v0.6.50-x64.exe`。
 2. 双击安装器，可修改安装位置、选择是否创建桌面快捷方式和开机自启，再点击「一键安装」。桌面快捷方式默认勾选，首次安装默认不开机自启；无需解压。
 3. 安装完成后打开「岛仔」，也可从桌面快捷方式启动。在托盘菜单打开设置，选择需要的功能。
 
@@ -89,7 +93,7 @@ QQ 收信、邮件日程和飞书个人日历已进行真实账号测试；钉�
 
 ## 数据留在什么地方
 
-- 设置、待办、饮水记录、置物路径和连接元数据保存在 `%APPDATA%\Daozai`。
+- 设置、待办、饮水记录、置物路径和连接元数据保存在 `%APPDATA%\DaozaiFork`（与原版岛仔分开）。
 - 邮箱和日历密码保存在 Windows 凭据管理器；Gemini 会话使用 Windows DPAPI 加密。
 - 读取已有 AI 客户端登录时不回写原客户端配置；不要把授权码、Cookie 或登录 JSON 上传到 Issue。
 - 邮箱读取收件箱，不读取垃圾邮件文件夹；邮件正文在当前进程中用于展示和识别。

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM, ERROR_ALREADY_EXISTS,
+    CloseHandle, GetLastError, BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM, ERROR_ALREADY_EXISTS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
@@ -48,8 +48,10 @@ const CMD_SETTINGS:u32=6;
 const TIMER_MENU: usize = 12;
 
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-const RUN_VALUE: PCWSTR = w!("Daozai");
-const MUTEX_NAME: PCWSTR = w!("Local\\Daozai.SingleInstance");
+// w!() 只接受字面量，需与 brand::APP_ID 保持一致（见 tray_identifiers_follow_app_id 测试）。
+const RUN_VALUE: PCWSTR = w!("DaozaiFork");
+const MUTEX_NAME: PCWSTR = w!("Local\\DaozaiFork.SingleInstance");
+const TRAY_CLASS: PCWSTR = w!("DaozaiForkTray");
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct State {
@@ -377,7 +379,7 @@ impl Tray {
                     return;
                 };
                 let hinst = HINSTANCE(module.0);
-                let class = w!("DaozaiTray");
+                let class = TRAY_CLASS;
                 let wc = WNDCLASSW {
                     style: WNDCLASS_STYLES(0),
                     lpfnWndProc: Some(wndproc),
@@ -572,6 +574,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tray_identifiers_follow_app_id() {
+        let text=|value:PCWSTR|unsafe{value.to_string()}.unwrap();
+        let id=crate::brand::APP_ID;
+        assert_eq!(text(RUN_VALUE),id);
+        assert_eq!(text(MUTEX_NAME),format!("Local\\{id}.SingleInstance"));
+        assert_eq!(text(TRAY_CLASS),format!("{id}Tray"));
+    }
+
+    #[test]
+    fn main_window_lookup_requires_the_matching_process(){unsafe{
+        let window=CreateWindowExW(WS_EX_TOOLWINDOW,w!("STATIC"),w!("岛仔"),WS_POPUP,0,0,1,1,None,None,None,None).unwrap();
+        let pid=windows::Win32::System::Threading::GetCurrentProcessId();
+        assert_eq!(main_window_for_process(pid),Some(window));
+        assert!(main_window_for_process(u32::MAX).is_none());
+        assert!(main_window_for_process(0).is_none());
+        DestroyWindow(window).unwrap();
+    }}
+
+    #[test]
     fn repeated_launch_requests_settings_or_calendar() {
         let tray=Tray::start(State::default()).expect("托盘应能启动");
         for (calendar,expected) in [(false,Event::OpenSettings),(true,Event::OpenCalendar)] {
@@ -637,14 +658,30 @@ fn request_existing_window(hwnd:HWND,calendar:bool)->bool {unsafe{
 }}
 
 pub fn activate_existing(calendar:bool)->bool {unsafe{
-    let Ok(tray)=FindWindowW(w!("DaozaiTray"),PCWSTR::null()) else{return false;};
-    let Ok(window)=FindWindowW(PCWSTR::null(),w!("岛仔")) else{return false;};
-    let(mut tray_pid,mut window_pid)=(0,0);
+    let Ok(tray)=FindWindowW(TRAY_CLASS,PCWSTR::null()) else{return false;};
+    let mut tray_pid=0;
     GetWindowThreadProcessId(tray,Some(&mut tray_pid));
-    GetWindowThreadProcessId(window,Some(&mut window_pid));
-    if tray_pid==0 || tray_pid!=window_pid{return false;}
+    let Some(window)=main_window_for_process(tray_pid) else{return false;};
     // 托盘有独立线程，能接收消息不代表界面线程仍可响应。
     if SendMessageTimeoutW(window,WM_NULL,WPARAM(0),LPARAM(0),
         SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,1500,None).0==0{return false;}
     request_existing_window(tray,calendar)
 }}
+
+// 原版与分支可以使用相同显示名称；只查找本分支托盘进程所属的主窗口。
+fn main_window_for_process(pid:u32)->Option<HWND> {
+    if pid==0{return None;}
+    struct Search {pid:u32,window:Option<HWND>}
+    unsafe extern "system" fn visit(hwnd:HWND,data:LPARAM)->BOOL {
+        let search=&mut *(data.0 as *mut Search);let mut owner=0;
+        GetWindowThreadProcessId(hwnd,Some(&mut owner));
+        if owner==search.pid {
+            let mut title=[0u16;64];let len=GetWindowTextW(hwnd,&mut title) as usize;
+            if String::from_utf16_lossy(&title[..len])=="岛仔"{search.window=Some(hwnd);return BOOL(0);}
+        }
+        BOOL(1)
+    }
+    let mut search=Search{pid,window:None};
+    unsafe{let _=EnumWindows(Some(visit),LPARAM(&mut search as *mut Search as isize));}
+    search.window
+}

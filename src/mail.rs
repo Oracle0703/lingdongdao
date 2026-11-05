@@ -12,7 +12,7 @@ use std::collections::HashMap;
 #[path="mail_fetch.rs"]
 mod fetch;
 
-pub const SERVICE: &str = "Daozai.Mail";
+pub const SERVICE: &str = concat!(crate::app_id!(), ".Mail");
 
 // ---------------------------------------------------------------- 邮箱类型
 
@@ -321,10 +321,18 @@ pub struct Meeting {
     pub uid: String,
 }
 
+#[path = "mail_invites.rs"]
+pub(crate) mod invites;
+pub use invites::CalendarUpdate;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Status { account: String, status: Status },
-    Mail { item: Item, new: bool },
+    /// UIDVALIDITY 变化后，旧 UID 对应的邮件缓存必须失效。
+    MailboxReset { account: String },
+    /// `updates` 是该邮件携带的日历邀请修订，与邮件同一事件送达，保证先记录邀请再入列，
+    /// 多个账号并发收信时不会被其他账号的邮件事件提前清理。
+    Mail { item: Item, new: bool, updates: Vec<CalendarUpdate> },
     Test { account: String, ok: bool, note: String },
 }
 
@@ -459,6 +467,11 @@ pub fn meeting_of(calendar: &str) -> Option<Meeting> {
 /// CalDAV 的 `calendar-query` 一次会返回多个事件，邮件里的 `.ics` 通常只有一个；
 /// 两者共用这一套解析；支持带时刻和全天日期，没有有效 DTSTART 就跳过。
 pub fn meetings_of(calendar: &str) -> Vec<Meeting> {
+    calendar_fields(calendar).into_iter().filter(|(method, _)| matches!(method.as_str(), "" | "REQUEST" | "PUBLISH"))
+        .filter_map(|(_, fields)| event_of(&fields)).collect()
+}
+
+fn calendar_fields(calendar: &str) -> Vec<(String, Vec<(String, String)>)> {
     // RFC 5545 折行：以空格/制表符开头的行是上一行的续行。
     let mut lines: Vec<String> = Vec::new();
     for raw in calendar.lines() {
@@ -475,12 +488,12 @@ pub fn meetings_of(calendar: &str) -> Vec<Meeting> {
     let mut out = Vec::new();
     let mut fields: Vec<(String, String)> = Vec::new();
     let mut in_event = false;
-    let mut cancelled = false;
+    let mut method = String::new();
     let mut nested = 0usize;
     for line in &lines {
         let up = line.to_ascii_uppercase();
-        if up=="BEGIN:VCALENDAR" {cancelled=false;}
-        if !in_event && up=="METHOD:CANCEL" {cancelled=true;}
+        if up=="BEGIN:VCALENDAR" {method.clear();}
+        if !in_event {if let Some(value)=up.strip_prefix("METHOD:"){method=value.trim().to_owned();}}
         if up=="BEGIN:VEVENT" {
             in_event = true;
             nested=0;
@@ -488,11 +501,7 @@ pub fn meetings_of(calendar: &str) -> Vec<Meeting> {
             continue;
         }
         if up=="END:VEVENT" {
-            if in_event && !cancelled {
-                if let Some(m) = event_of(&fields) {
-                    out.push(m);
-                }
-            }
+            if in_event {out.push((method.clone(), std::mem::take(&mut fields)));}
             in_event = false;
             continue;
         }
@@ -504,7 +513,7 @@ pub fn meetings_of(calendar: &str) -> Vec<Meeting> {
         if nested>0 {continue;}
         let Some((head, value)) = line.split_once(':') else { continue };
         let name = head.split(';').next().unwrap_or("").to_ascii_uppercase();
-        if name == "DTSTART" || name == "DTEND" {
+        if name == "DTSTART" || name == "DTEND" || name == "RECURRENCE-ID" {
             if let Some(tz) = head.split(';').skip(1).find_map(|p| p.split_once('=').filter(|(k, _)| k.eq_ignore_ascii_case("TZID")).map(|(_, v)| v.trim_matches('"'))) {
                 fields.push((format!("{name}-TZID"), tz.to_string()));
             }
@@ -515,10 +524,23 @@ pub fn meetings_of(calendar: &str) -> Vec<Meeting> {
 }
 
 fn event_of(fields: &[(String, String)]) -> Option<Meeting> {
-    use chrono::TimeZone;
     let get = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
     if get("STATUS").is_some_and(|v|v.eq_ignore_ascii_case("CANCELLED")){return None;}
-    let parse_time = |name: &str| -> Option<chrono::DateTime<chrono::Local>> {
+    let naive = event_time(fields, "DTSTART")?;
+    let all_day=get("DTSTART").is_some_and(|value|!value.contains('T'));
+    let end = event_time(fields, "DTEND").map(|at|at.timestamp()).filter(|end|*end>naive.timestamp())
+        .or_else(||all_day.then(||naive.date_naive().succ_opt()?.and_hms_opt(0,0,0)?.and_local_timezone(chrono::Local).earliest().map(|at|at.timestamp())).flatten());
+    let title = get("SUMMARY").map(|v| ics_text(&v)).filter(|t| !t.is_empty()).unwrap_or_else(|| "会议".to_string());
+    Some(Meeting {
+        all_day, title, start: naive.timestamp(), end,
+        at: naive.format(if all_day {"%m-%d 全天"}else{"%m-%d %H:%M"}).to_string(),
+        uid: get("UID").unwrap_or_default(),
+    })
+}
+
+fn event_time(fields: &[(String, String)], name: &str) -> Option<chrono::DateTime<chrono::Local>> {
+        use chrono::TimeZone;
+        let get = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
         let value = get(name)?;
         Some(if let Some(s) = value.strip_suffix('Z') {
             chrono::NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%S").ok()?.and_utc().with_timezone(&chrono::Local)
@@ -534,20 +556,6 @@ fn event_of(fields: &[(String, String)]) -> Option<Meeting> {
                 chrono::Local.from_local_datetime(&n).single()?
             }
         })
-    };
-    let naive = parse_time("DTSTART")?;
-    let all_day=get("DTSTART").is_some_and(|value|!value.contains('T'));
-    let end = parse_time("DTEND").map(|at|at.timestamp()).filter(|end|*end>naive.timestamp())
-        .or_else(||all_day.then(||naive.date_naive().succ_opt()?.and_hms_opt(0,0,0)?.and_local_timezone(chrono::Local).earliest().map(|at|at.timestamp())).flatten());
-    let title = get("SUMMARY").map(|v| ics_text(&v)).filter(|t| !t.is_empty()).unwrap_or_else(|| "会议".to_string());
-    Some(Meeting {
-        all_day,
-        title,
-        start: naive.timestamp(),
-        end,
-        at: naive.format(if all_day {"%m-%d 全天"}else{"%m-%d %H:%M"}).to_string(),
-        uid: get("UID").unwrap_or_default(),
-    })
 }
 
 /// iCalendar 文本转义：`\n` / `\,` / `\;` / `\\`。
@@ -916,8 +924,7 @@ mod service {
     }
 
     fn worker(account: Account, stop: Arc<AtomicBool>, interval: Arc<AtomicU64>, ev: Sender<Event>) {
-        let mut first = true;
-        let mut last_uid = 0u32;
+        let mut cursor = MailboxCursor::default();
         loop {
             if stop.load(Ordering::Relaxed) {
                 return;
@@ -957,7 +964,9 @@ mod service {
                 account: account.email.clone(),
                 status: Status::Ready,
             });
-            if session.select("INBOX").is_err() {
+            let mailbox = match session.select("INBOX") {
+                Ok(mailbox) => mailbox,
+                Err(_) => {
                 let _ = ev.send(Event::Status {
                     account: account.email.clone(),
                     status: Status::Failed("无法打开收件箱".into()),
@@ -966,10 +975,16 @@ mod service {
                     return;
                 }
                 continue;
+                }
+            };
+            if cursor.select(mailbox.uid_validity) {
+                let _ = ev.send(Event::MailboxReset { account: account.email.clone() });
             }
-            if first {
-                last_uid = recent(&mut session, &account, &ev).unwrap_or(0);
-                first = false;
+            if !cursor.initialized {
+                match recent(&mut session, &account, &cursor.skipped, &ev) {
+                    Ok(last) => {cursor.last = last; cursor.initialized = true; cursor.failing = None;}
+                    Err(interrupted) => {cursor.failed(interrupted); if sleep_stop(&stop, 10) {return;} continue;}
+                }
             }
 
             let idle_supported=match session.capabilities() {
@@ -997,8 +1012,9 @@ mod service {
                     let _ = session.logout();
                     return;
                 }
-                if fetch_new(&mut session, &account, &mut last_uid, &ev).is_err() {
-                    break;
+                match fetch_new(&mut session, &account, &mut cursor.last, &cursor.skipped, &ev) {
+                    Ok(()) => cursor.failing = None,
+                    Err(interrupted) => {cursor.failed(interrupted); break;}
                 }
             }
             if sleep_stop(&stop, 10) {
@@ -1007,20 +1023,59 @@ mod service {
         }
     }
 
+    /// 同一封邮件在重新连接后仍连续读取失败的次数上限，超过后跳过它。
+    const MAX_FETCH_ATTEMPTS: u8 = 3;
+
+    /// 抓取中断的位置：`Some(uid)` 表示这封邮件读取失败，`None` 表示连接、搜索或事件通道出错。
+    type Interrupted = Option<u32>;
+
+    #[derive(Default)]
+    struct MailboxCursor {
+        validity: Option<u32>, last: u32, selected: bool, initialized: bool,
+        /// 最近一次读取失败的邮件及连续失败次数。
+        failing: Option<(u32, u8)>,
+        /// 多次重试仍无法读取、已放弃的邮件；邮件仍在服务器上，可在邮箱客户端查看。
+        skipped: std::collections::HashSet<u32>,
+    }
+    impl MailboxCursor {
+        fn select(&mut self, validity: Option<u32>) -> bool {
+            let changed = self.selected && (validity.is_none() || self.validity != validity);
+            if changed {self.last = 0; self.initialized = false; self.failing = None; self.skipped.clear();}
+            self.validity = validity;
+            self.selected = true;
+            changed
+        }
+        /// 网络中断时保持游标，重连后从失败处继续；但同一封邮件在重连后仍连续失败
+        /// （服务器拒绝返回或内容无法解析）时放弃它，避免一封坏邮件挡住之后的所有新邮件。
+        fn failed(&mut self, interrupted: Interrupted) {
+            let Some(uid) = interrupted else { return };
+            let attempts = match self.failing {Some((failed, count)) if failed == uid => count + 1, _ => 1};
+            if attempts >= MAX_FETCH_ATTEMPTS {self.skipped.insert(uid); self.failing = None;}
+            else {self.failing = Some((uid, attempts));}
+        }
+    }
+
+    fn deliver(fetched: super::fetch::Fetched, new: bool, ev: &Sender<Event>) -> Result<(), ()> {
+        let super::fetch::Fetched { item, updates } = fetched;
+        ev.send(Event::Mail { item, new, updates }).map_err(|_| ())
+    }
+
     /// 首次连接：把最近 20 封读进面板，但不当作新邮件提示。
-    fn recent(
-        session: &mut imap::Session<net::Prefixed<net::Stream>>,
+    fn recent<S: std::io::Read + std::io::Write>(
+        session: &mut imap::Session<S>,
         account: &Account,
+        skipped: &std::collections::HashSet<u32>,
         ev: &Sender<Event>,
-    ) -> Result<u32, ()> {
-        let all = session.uid_search("ALL").map_err(|_| ())?;
+    ) -> Result<u32, Interrupted> {
+        let all = session.uid_search("ALL").map_err(|_| None)?;
         let mut uids: Vec<u32> = all.into_iter().collect();
         uids.sort_unstable();
         let max = uids.last().copied().unwrap_or(0);
         let tail: Vec<u32> = uids.iter().rev().take(20).rev().copied().collect();
         for uid in tail {
-            if let Ok(Some(item))=super::fetch::item(session,uid,account){
-                let _=ev.send(Event::Mail{item,new:false});
+            if skipped.contains(&uid) {continue;}
+            if let Some(item)=super::fetch::item_with_updates(session,uid,account).map_err(|_| Some(uid))? {
+                deliver(item, false, ev).map_err(|_| None)?;
             }
         }
         Ok(max)
@@ -1037,7 +1092,7 @@ mod service {
             if let Ok(event)=service.ev.recv_timeout(Duration::from_secs(1)) {
                 match event {
                     Event::Status{status,..}=>println!("worker_status={status:?}"),
-                    Event::Mail{new,item}=>{
+                    Event::Mail{new,item,..}=>{
                         println!("worker_mail new={new} test_message={}",item.subject.starts_with("岛仔"));
                         if new && item.subject=="岛仔后台监听实测" {
                             service.sync(&[],120);return;
@@ -1056,7 +1111,7 @@ mod service {
         let account=load_accounts().into_iter().find(|a|a.provider==Provider::Qq&&a.enabled).unwrap();
         let password=secrets::load(&account.credential_key()).unwrap();
         let mut session=net::connect(&account,&password).unwrap();session.examine("INBOX").unwrap();
-        let (tx,rx)=std::sync::mpsc::channel();recent(&mut session,&account,&tx).unwrap();
+        let (tx,rx)=std::sync::mpsc::channel();recent(&mut session,&account,&Default::default(),&tx).unwrap();
         let items=rx.try_iter().filter_map(|ev|if let Event::Mail{item,..}=ev{Some(item)}else{None}).collect::<Vec<_>>();
         let invite=items.iter().find(|m|m.subject=="【岛仔测试】邮件日程邀请：收件箱合并验证").expect("测试邀请未到达");
         assert_eq!(invite.meeting.as_ref().unwrap().uid,"daozai-mail-test-20261103-1500");
@@ -1077,7 +1132,7 @@ mod service {
         println!("idle_supported={}",session.capabilities().expect("读取能力失败").has_str("IDLE"));
         let before=session.uid_search("UNSEEN").expect("读取未读状态失败");
         let (tx,rx)=std::sync::mpsc::channel();
-        let mut last=recent(&mut session,account,&tx).expect("最近邮件读取失败");
+        let mut last=recent(&mut session,account,&Default::default(),&tx).expect("最近邮件读取失败");
         let initial=rx.try_iter().collect::<Vec<_>>();
         assert!(initial.iter().all(|e|matches!(e,Event::Mail{new:false,..})));
         println!("login=ok readonly_inbox=ok recent_parsed={}",initial.len());
@@ -1086,34 +1141,129 @@ mod service {
         }}
         let received=initial.iter().any(|e|matches!(e,Event::Mail{item,..} if item.subject=="岛仔收信测试"&&item.code.as_deref()==Some("482731")&&!item.links.is_empty()));
         println!("test_message_with_code_and_link={received}");
-        fetch_new(&mut session,account,&mut last,&tx).expect("增量收取失败");
+        fetch_new(&mut session,account,&mut last,&Default::default(),&tx).expect("增量收取失败");
         let added=rx.try_iter().count();
         let after=session.uid_search("UNSEEN").expect("检查未读状态失败");
         println!("incremental_fetch=ok new_messages={} unseen_unchanged={}",added,before==after);
         session.logout().expect("退出失败");
     }
 
-    fn fetch_new(
-        session: &mut imap::Session<net::Prefixed<net::Stream>>,
+    fn fetch_new<S: std::io::Read + std::io::Write>(
+        session: &mut imap::Session<S>,
         account: &Account,
         last: &mut u32,
+        skipped: &std::collections::HashSet<u32>,
         ev: &Sender<Event>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), Interrupted> {
         let set = session
             .uid_search(format!("UID {}:*", last.saturating_add(1)))
-            .map_err(|_| ())?;
+            .map_err(|_| None)?;
         let mut uids: Vec<u32> = set.into_iter().filter(|u| *u > *last).collect();
         uids.sort_unstable();
-        if uids.len() > 5 {
-            uids = uids.split_off(uids.len() - 5);
-        }
         for uid in uids {
-            if let Some(item)=super::fetch::item(session,uid,account)? {
-                let _=ev.send(Event::Mail{item,new:true});
+            if !skipped.contains(&uid) {
+                if let Some(item)=super::fetch::item_with_updates(session,uid,account).map_err(|_| Some(uid))? {
+                    deliver(item, true, ev).map_err(|_| None)?;
+                }
             }
             *last = (*last).max(uid);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod sync_tests {
+        use super::*;
+        use std::io::{Cursor, Read, Write};
+        #[derive(Debug)]
+        struct Wire { input: Cursor<Vec<u8>>, output: Vec<u8> }
+        impl Read for Wire {fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {self.input.read(bytes)}}
+        impl Write for Wire {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {self.output.extend_from_slice(bytes); Ok(bytes.len())}
+            fn flush(&mut self) -> std::io::Result<()> {Ok(())}
+        }
+        fn account() -> Account {Account { email: "test@example.com".into(), provider: Provider::Qq, custom: None, enabled: true }}
+        fn session(uids: &[u32], fail: Option<u32>) -> imap::Session<Wire> {session_with(uids, uids, fail)}
+        /// `search` 是 SEARCH 返回的 UID，`fetched` 是随后实际发出 FETCH 的 UID（已放弃的邮件不会再抓取）。
+        fn session_with(search: &[u32], fetched: &[u32], fail: Option<u32>) -> imap::Session<Wire> {
+            let mut wire = format!("a1 OK login\r\n* SEARCH {}\r\na2 OK search\r\n", search.iter().map(u32::to_string).collect::<Vec<_>>().join(" "));
+            for (index, uid) in fetched.iter().enumerate() {
+                let tag = index + 3;
+                if fail == Some(*uid) {
+                    // BODYSTRUCTURE 读取失败，旧协议回退也失败，不可越过此 UID。
+                    wire.push_str(&format!("a{tag} BAD unavailable\r\na{} BAD unavailable\r\n", tag + 1));
+                    break;
+                }
+                let header = format!("From: test@example.com\r\nSubject: Message {uid}\r\n\r\n");
+                wire.push_str(&format!("* 1 FETCH (UID {uid} BODYSTRUCTURE (\"APPLICATION\" \"OCTET-STREAM\" NIL NIL NIL \"BASE64\" 0) BODY[HEADER] {{{}}}\r\n{header})\r\na{tag} OK fetch\r\n", header.len()));
+            }
+            imap::Client::new(Wire { input: Cursor::new(wire.into_bytes()), output: vec![] }).login("test", "test").unwrap()
+        }
+        #[test]
+        fn new_batches_of_six_and_twenty_deliver_every_uid() {
+            for count in [6, 20] {
+                let uids = (101..101 + count).collect::<Vec<_>>();
+                let (tx, rx) = channel(); let mut last = 100;
+                fetch_new(&mut session(&uids, None), &account(), &mut last, &Default::default(), &tx).unwrap();
+                let received = rx.try_iter().filter_map(|event| if let Event::Mail { item, new, .. } = event {assert!(new); Some(item.uid)} else {None}).collect::<Vec<_>>();
+                assert_eq!(received, uids);
+                assert_eq!(last, 100 + count);
+            }
+        }
+        #[test]
+        fn failed_message_keeps_cursor_and_retry_delivers_remaining_batch() {
+            let (tx, rx) = channel(); let mut last = 100;
+            assert!(fetch_new(&mut session(&[101, 102, 103, 104, 105, 106], Some(103)), &account(), &mut last, &Default::default(), &tx).is_err());
+            assert_eq!(last, 102);
+            fetch_new(&mut session(&[103, 104, 105, 106], None), &account(), &mut last, &Default::default(), &tx).unwrap();
+            let received = rx.try_iter().filter_map(|event| if let Event::Mail { item, .. } = event {Some(item.uid)} else {None}).collect::<Vec<_>>();
+            assert_eq!(received, vec![101, 102, 103, 104, 105, 106]);
+            assert_eq!(last, 106);
+            assert!(recent(&mut session(&[1, 2, 3], Some(2)), &account(), &Default::default(), &tx).is_err(), "首次同步失败也不能把整个批次标记为成功");
+        }
+        #[test]
+        fn a_message_that_keeps_failing_is_skipped_so_later_mail_still_arrives() {
+            let (tx, rx) = channel();
+            let mut cursor = MailboxCursor::default(); cursor.select(Some(1)); cursor.last = 100; cursor.initialized = true;
+            for attempt in 1..=MAX_FETCH_ATTEMPTS {
+                let mut wire = if attempt == 1 {session(&[101, 102, 103], Some(102))} else {session(&[102, 103], Some(102))};
+                let error = fetch_new(&mut wire, &account(), &mut cursor.last, &cursor.skipped, &tx).unwrap_err();
+                assert_eq!(error, Some(102));
+                cursor.failed(error);
+                assert_eq!(cursor.skipped.contains(&102), attempt == MAX_FETCH_ATTEMPTS, "先按网络中断重试，连续失败才放弃");
+                assert_eq!(cursor.last, 101);
+            }
+            fetch_new(&mut session_with(&[102, 103], &[103], None), &account(), &mut cursor.last, &cursor.skipped, &tx).unwrap();
+            assert_eq!(cursor.last, 103);
+            let received = rx.try_iter().filter_map(|event| if let Event::Mail { item, .. } = event {Some(item.uid)} else {None}).collect::<Vec<_>>();
+            assert_eq!(received, vec![101, 103]);
+            // 首次同步同样跳过已放弃的邮件，不再卡在初始化阶段。
+            let last = recent(&mut session_with(&[101, 102, 103], &[101, 103], None), &account(), &cursor.skipped, &tx).unwrap();
+            assert_eq!(last, 103);
+            assert_eq!(rx.try_iter().filter(|event| matches!(event, Event::Mail { .. })).count(), 2);
+            // 连接或通道错误不计入单封邮件的失败次数；换了一封失败的邮件重新计数。
+            let mut other = MailboxCursor::default();
+            other.failed(None); other.failed(Some(5)); other.failed(Some(5)); other.failed(Some(6));
+            assert!(other.skipped.is_empty()); assert_eq!(other.failing, Some((6, 1)));
+            // UID 空间改变后，旧的放弃记录随之失效。
+            assert!(cursor.select(Some(2))); assert!(cursor.skipped.is_empty());
+        }
+        #[test]
+        fn uidvalidity_changes_reset_cursor_and_allow_smaller_uids() {
+            let mut cursor = MailboxCursor::default();
+            assert!(!cursor.select(Some(10)));
+            cursor.last = 900; cursor.initialized = true;
+            assert!(!cursor.select(Some(10))); assert_eq!(cursor.last, 900);
+            assert!(cursor.select(Some(11))); assert_eq!(cursor.last, 0); assert!(!cursor.initialized);
+            let (tx, rx) = channel();
+            cursor.last = recent(&mut session(&[1, 2], None), &account(), &Default::default(), &tx).unwrap(); cursor.initialized = true;
+            assert_eq!(cursor.last, 2);
+            assert_eq!(rx.try_iter().filter(|event| matches!(event, Event::Mail { new: false, .. })).count(), 2);
+            assert!(cursor.select(None), "服务器没有 UIDVALIDITY 时也不能沿用旧 UID 空间");
+            let mut partial = MailboxCursor::default();
+            assert!(!partial.select(Some(20)));
+            assert!(partial.select(Some(21)), "首次同步部分失败时也可能已显示旧邮件，UID 空间改变必须清除");
+        }
     }
 }
 

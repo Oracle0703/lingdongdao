@@ -87,7 +87,7 @@ fn endpoint(cfg: &Config) -> Result<url::Url, Failure> {
 fn command(agent: &ureq::Agent, cfg: &Config, password: &str, name: &str, root: &Node) -> Result<Node, Failure> {
     let mut target = endpoint(cfg)?;
     // 固定匿名设备标识，完整快照按顺序读取，不保存同步键或日程正文。
-    target.query_pairs_mut().extend_pairs([("Cmd", name), ("User", cfg.username.as_str()), ("DeviceId", "DaozaiCalendar01"), ("DeviceType", "Daozai")]);
+    target.query_pairs_mut().extend_pairs([("Cmd", name), ("User", cfg.username.as_str()), ("DeviceId", concat!(crate::app_id!(), "Calendar01")), ("DeviceType", crate::brand::APP_ID)]);
     let response = agent.post(target.as_str())
         .set("Authorization", &super::basic_auth(&cfg.username, password))
         .set("MS-ASProtocolVersion", "14.0")

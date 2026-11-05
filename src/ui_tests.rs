@@ -23,7 +23,7 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     assert!(!upgraded.clock_12h && !upgraded.notification_preview);
     assert_eq!(upgraded.clock_period,0);assert_eq!(upgraded.mail_code_hide_seconds,60);
     for _ in 0..2 {
-        crate::model::Settings::load().save();
+        crate::model::Settings::load().save().unwrap();
         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
         for line in legacy.lines(){assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");}
     }
@@ -289,7 +289,7 @@ fn quality_distinct_reminders_are_queued_instead_of_overwritten() {
 fn quality_removed_mail_accounts_ignore_in_flight_results() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.mail_event(crate::mail::Event::Status{account:"removed@example.com".into(),status:crate::mail::Status::Ready});
-    h.app.mail_event(crate::mail::Event::Mail{item:crate::mail::Item {received_unix: None, account:"removed@example.com".into(),from:"发件人".into(),subject:"延迟邮件".into(),time:String::new(),code:None,summary:String::new().into(),links:vec![],meeting:None,uid:1},new:true});
+    h.app.mail_event(crate::mail::Event::Mail{item:crate::mail::Item {received_unix: None, account:"removed@example.com".into(),from:"发件人".into(),subject:"延迟邮件".into(),time:String::new(),code:None,summary:String::new().into(),links:vec![],meeting:None,uid:1},new:true,updates:Vec::new()});
     assert!(h.app.mail.status.is_empty() && h.app.mail.recent.is_empty());
     assert!(h.app.notification_bell_until<=h.t);
 }
@@ -318,6 +318,7 @@ struct H {
 impl H {
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!("daozai-test-{}-{}", std::process::id(), rand_id()));
+        std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("DAOZAI_DATA_DIR", &dir);
         let ctx = egui::Context::default();
         let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
@@ -408,7 +409,7 @@ impl H {
         for i in 0..count {
             let id=format!("preview-{i}");
             self.app.quota.config.accounts.push(Account{id:id.clone(),provider:Provider::ALL[i%3],alias:format!("账号 {}",i+1),source:format!("preview-{i}.json").into(),slot:None,enabled:true,pinned:true});
-            self.app.quota_event(crate::quota::Event{id,result:Ok(Snapshot{windows:vec![Window{label:"本周".into(),seconds:Some(604800),remaining:100.0,reset:None}],..Default::default()})});
+            self.app.quota_event(crate::quota::Event::new(self.app.quota.config.accounts.last().unwrap(),Ok(Snapshot{windows:vec![Window{label:"本周".into(),seconds:Some(604800),remaining:100.0,reset:None}],..Default::default()})));
         }
     }
     fn quota_centers(&self)->Vec<f32> {
@@ -851,12 +852,38 @@ fn music_lyric_timing_follows_saved_delay_and_preserves_playback_position(){
             let active=h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()==text && t.galley.job.sections[0].format.font_id.size==12.0));
             assert_eq!(active,expected==Some(text),"展开歌词也应使用相同的显示时间");
         }
-        h.app.settings.save();
+        h.app.settings.save().unwrap();
         assert_eq!(crate::model::Settings::load().lyric_delay_ms,delay,"重启后应保留时间调整");
     }
     for (input,expected) in [("invalid",-350),("999999",5000),("-999999",-5000),("",-350)]{
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("lyric_delay_ms={input}\n")).unwrap();
         assert_eq!(crate::model::Settings::load().lyric_delay_ms,expected);
+    }
+}
+
+#[test]
+fn llm_settings_show_every_field_inside_the_small_settings_window(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings_tab=12;h.app.open_settings();h.ctx.set_embed_viewports(false);
+    let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+    egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+        let id=viewport.ids.this;
+        let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(600.0,450.0))),
+            viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.25),focused:Some(true),..Default::default()})).collect(),
+            focused:true,..Default::default()};
+        *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+    });
+    let mut shapes=Vec::new();
+    for _ in 0..4{
+        let raw=egui::RawInput{viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(1.25),..Default::default()})).collect(),..Default::default()};
+        let _=h.ctx.run(raw,|ctx|h.app.settings_ui(ctx,false));
+        shapes=output.lock().unwrap().take().unwrap().shapes;
+    }
+    for text in ["AI 额度与模型","AI 额度","大模型","启用大模型","接口地址","模型","API Key","推理强度","超时","测试连接","获取模型列表","保存"]{
+        let rect=shapes.iter().find_map(|shape|match &shape.shape{
+            egui::Shape::Text(t)if t.galley.text()==text=>Some(t.visual_bounding_rect()),_=>None,
+        }).unwrap_or_else(||panic!("大模型设置缺少 {text}"));
+        assert!(Rect::from_min_max(Pos2::ZERO,egui::pos2(600.0,450.0)).contains_rect(rect),"{text} 应完整显示在窗口内：{rect:?}");
     }
 }
 
@@ -1139,7 +1166,7 @@ fn browser_minimal_preserves_preferences_and_restores_the_previous_mode(){
     h.app.settings.pet=true;h.app.settings.minimal=false;h.browser_at_top=Some(true);
     for _ in 0..90 {h.frame(vec![]);}
     assert!(h.hit.height()>20.0,"开关默认关闭时不应自动改变模式");
-    h.app.settings.browser_minimal=true;h.app.settings.save();h.app.settings.island_lyrics=true;
+    h.app.settings.browser_minimal=true;h.app.settings.save().unwrap();h.app.settings.island_lyrics=true;
     h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:7.0,duration:120.0,..Default::default()};
     h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:05]当前歌词"));
     for _ in 0..90 {h.frame(vec![]);}
@@ -1391,7 +1418,7 @@ fn quota_text_stays_inside_the_inner_ring_at_zero_and_full_usage() {
         let reset=Some((chrono::Local::now()+chrono::Duration::days(400)).timestamp());
         let mut windows=vec![Window{label:"本周".into(),seconds:Some(604800),remaining,reset}];
         if dual {windows.insert(0,Window{label:"5 小时".into(),seconds:Some(18000),remaining,reset});}
-        h.app.quota_event(Event{id:"preview-0".into(),result:Ok(Snapshot{windows,..Default::default()})});
+        h.app.quota_event(Event::new(&h.app.quota.config.accounts[0],Ok(Snapshot{windows,..Default::default()})));
         h.app.show_page(6);h.hover(H::local(300.0,60.0),1.0);
         let center=H::local(103.0,89.0);
         let inner=h.shapes.iter().filter_map(|shape|match &shape.shape {
@@ -1425,15 +1452,15 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     for id in ["personal","work"] {h.app.quota.config.accounts.push(Account{id:id.into(),provider:Provider::Codex,alias:id.into(),source:format!("{id}.json").into(),slot:None,enabled:true,pinned:true});}
     h.app.quota.config.selected="personal".into();
-    h.app.quota_event(crate::quota::Event{id:"personal".into(),result:crate::quota::parse(Provider::Codex,&serde_json::json!({"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800}}}))});
-    h.app.quota_event(crate::quota::Event{id:"work".into(),result:Err("登录已失效".into())});
+    h.app.quota_event(crate::quota::Event::new(&h.app.quota.config.accounts[0],crate::quota::parse(Provider::Codex,&serde_json::json!({"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800}}}))));
+    h.app.quota_event(crate::quota::Event::new(&h.app.quota.config.accounts[1],Err("登录已失效".into())));
     assert_eq!(h.app.quota.rows["personal"].as_ref().unwrap().windows[0].remaining,80.0);
     assert!(h.app.quota.rows["work"].is_err());assert_eq!(h.app.quota_bar_indices().len(),2);
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.show_page(6);h.hover(H::local(300.0,60.0),0.7);
     h.click(H::local(202.0,39.0));assert_eq!(h.app.quota.config.selected,"work");
     assert_eq!(crate::quota::Config::load().selected,"work");
     h.app.set_page_visible(6,false);assert!(h.app.quota_bar_indices().is_empty());assert_ne!(h.app.page,6);
-    h.app.quota.config.accounts.retain(|a|a.id!="work");h.app.quota_event(crate::quota::Event{id:"work".into(),result:Ok(Default::default())});
+    let late=crate::quota::Event::new(&h.app.quota.config.accounts[1],Ok(Default::default()));h.app.quota.config.accounts.retain(|a|a.id!="work");h.app.quota_event(late);
     assert!(h.app.quota.rows["work"].is_err(),"移除账号后不得接收晚到的额度数据");
 }
 
@@ -1446,7 +1473,7 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
     h.app.set_page_visible(3,false);
-    h.app.settings.save();
+    h.app.settings.save().unwrap();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
     assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true]);
@@ -1581,7 +1608,7 @@ fn mail_page_shows_code_and_copies_on_click() {
             meeting: None,
             uid: 42,
         },
-        new: true,
+        new: true, updates: Vec::new(),
     });
     assert!(h.app.notification_bell_until > 0.0, "新邮件应点亮铃铛");
     assert!(h.app.alerts.iter().any(|a|a.title=="新邮件"&&a.page==5),"新邮件应进入通知队列，不能只有收起时才可见的铃铛");
@@ -1617,7 +1644,7 @@ fn mail_row_opens_summary_and_back_returns() {
             meeting: None,
             uid: 42,
         },
-        new: true,
+        new: true, updates: Vec::new(),
     });
     h.app.show_page(5);
     h.hover(Pos2::new(WIN_W / 2.0, 12.0), 0.6);
@@ -1633,7 +1660,7 @@ fn mail_row_opens_summary_and_back_returns() {
 fn empty_todo_draft_can_be_cancelled_by_clicking_elsewhere(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for text in ["","   "]{
-        let mut h=H::new();h.app.todos.items=vec![crate::model::TodoItem{text:"保留任务".into(),due:None,done_on:None,reminded:false}];h.app.todos.save();
+        let mut h=H::new();h.app.todos.items=vec![crate::model::TodoItem{text:"保留任务".into(),due:None,done_on:None,reminded:false}];h.app.todos.save().unwrap();
         h.app.show_page(4);h.hover(H::local(300.0,60.0),1.0);h.click(H::local(70.0,109.0));
         assert!(h.app.adding,"点击添加后应保留空白输入框");
         if !text.is_empty(){h.frame(vec![egui::Event::Text(text.into())]);}
@@ -1974,7 +2001,7 @@ fn mascot_expression_gallery(){
 #[test]
 fn todo_due_roundtrip_and_fires_only_once(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.todos.items.push(crate::model::TodoItem{text:"会议 | 准备".into(),done_on:None,due:Some("2026-10-28 09:40".into()),reminded:false});h.app.todos.save();
+    h.app.todos.items.push(crate::model::TodoItem{text:"会议 | 准备".into(),done_on:None,due:Some("2026-10-28 09:40".into()),reminded:false});h.app.todos.save().unwrap();
     let loaded=crate::model::TodoList::load();assert_eq!(loaded.items[0].text,"会议 | 准备");assert_eq!(loaded.items[0].due.as_deref(),Some("2026-10-28 09:40"));
     h.frame(vec![]);assert!(h.app.todos.items[0].reminded);let n=h.cmds.len();h.frame(vec![]);assert_eq!(n,h.cmds.len());assert!(crate::model::TodoList::load().items[0].reminded);
 }
@@ -2164,7 +2191,7 @@ fn rest_settings_keep_the_existing_duration_and_save_the_new_key(){
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path,"focus_minutes=30\nshort_minutes=7\nlong_minutes=17\n").unwrap();
     let settings=crate::model::Settings::load();assert_eq!(settings.rest_minutes,7);
-    settings.save();let saved=std::fs::read_to_string(&path).unwrap();
+    settings.save().unwrap();let saved=std::fs::read_to_string(&path).unwrap();
     assert!(saved.lines().any(|line|line=="rest_minutes=7"));
     assert!(!saved.contains("short_minutes") && !saved.contains("long_minutes"));
     let reloaded=crate::model::Settings::load();assert_eq!(reloaded.rest_minutes,7);assert_eq!(reloaded.focus_minutes,30);
@@ -2605,7 +2632,7 @@ fn calendar_notice_opens_the_calendar_instead_of_mail() {
     let mut h=H::new();
     assert!(h.app.settings.calendar_auto_sync);
     h.app.settings.calendar_auto_sync=false;
-    h.app.settings.save();
+    h.app.settings.save().unwrap();
     assert!(!crate::model::Settings::load().calendar_auto_sync,"自动同步选择应持久保存");
     let start=chrono::Local::now().timestamp()+600;
     h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None});
@@ -2835,7 +2862,7 @@ fn calendar_reminder_fires_once_and_dedupes_with_mail() {
             meeting: Some(meeting("周会")),
             uid: 7,
         },
-        new: true,
+        new: true, updates: Vec::new(),
     });
     h.app.calendar_event(crate::calendar::Event::Synced {
         config:h.app.calendar.config.clone().unwrap(),
@@ -3234,7 +3261,7 @@ fn ui_alignment_layout_gallery(){
             raster.free_textures(&out.textures_delta);
         }
     }}
-    for width in [600.0,690.0]{for tab in 0..12{
+    for width in [600.0,690.0]{for tab in 0..13{
         let mut h=fixture();h.app.settings_tab=tab;h.app.open_settings();h.ctx.set_embed_viewports(false);
         let size=egui::vec2(width,if width==600.0{450.0}else{560.0});let ppp=1.25;
         let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
@@ -3359,7 +3386,7 @@ fn resident_components_can_be_dragged_saved_and_reset(){
     draw(&mut h,vec![button(to,false)]);
     assert_eq!(h.app.settings.resident_order.first(),Some(&CLOCK));
     assert!(h.app.settings.resident_order.contains(&BATTERY));
-    h.app.settings.save();assert_eq!(crate::model::Settings::load().resident_order,h.app.settings.resident_order);
+    h.app.settings.save().unwrap();assert_eq!(crate::model::Settings::load().resident_order,h.app.settings.resident_order);
     let reset=point(&h,"恢复默认");draw(&mut h,vec![egui::Event::PointerMoved(reset),button(reset,true)]);draw(&mut h,vec![button(reset,false)]);
     assert!(h.app.settings.resident_order.is_empty());
 }
@@ -3523,7 +3550,7 @@ fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
     h.app.settings.page_order=[5,2,0,1,3,4,6,7];
-    h.app.settings.save();
+    h.app.settings.save().unwrap();
     let settings=crate::model::Settings::load();
     assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
@@ -3585,7 +3612,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
     for (mode,system,dark) in [(SettingsTheme::System,false,false),(SettingsTheme::System,true,true),
         (SettingsTheme::System,false,false),(SettingsTheme::Dark,false,true),(SettingsTheme::Light,true,false)] {
         h.app.settings.settings_theme=mode;
-        h.app.settings.save();assert_eq!(crate::model::Settings::load().settings_theme,mode);
+        h.app.settings.save().unwrap();assert_eq!(crate::model::Settings::load().settings_theme,mode);
         h.ctx.data_mut(|d|d.insert_temp(egui::Id::new("settings-system-theme"),(std::time::Instant::now(),system)));
         let output=std::sync::Arc::new(std::sync::Mutex::new(None));let capture=output.clone();
         egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
@@ -3810,7 +3837,7 @@ fn clock_12h_formats_boundaries_and_persists() {
         assert_eq!(h.app.settings.clock_text(input),expected);
     }
     assert_eq!(h.app.settings.clock_text("13:05"),"下午 1:05");
-    h.app.settings.save();
+    h.app.settings.save().unwrap();
     assert!(crate::model::Settings::load().clock_12h);
     h.app.settings.pet=false;
     h.quota_accounts(5);
@@ -3823,7 +3850,7 @@ fn clock_12h_formats_boundaries_and_persists() {
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="9:41")));
     h.app.settings.clock_period=0;
     h.app.settings.clock_12h=false;
-    h.app.settings.save();
+    h.app.settings.save().unwrap();
     assert!(!crate::model::Settings::load().clock_12h);
     h.frame(vec![]);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="09:41")));
@@ -3842,7 +3869,7 @@ fn clock_period_boundaries_and_both_formats() {
         assert_eq!(h.app.settings.clock_text("19:30"),if twelve {"晚上 7:30"}else{"晚上 19:30"});
         for mode in 0..=2 {
             h.app.settings.clock_period=mode;
-            h.app.settings.save();
+            h.app.settings.save().unwrap();
             let loaded=crate::model::Settings::load();
             assert_eq!(loaded.clock_period,mode);
             assert_eq!(loaded.clock_12h,twelve);
@@ -3925,7 +3952,7 @@ fn avoidance_picker_add_remove_and_save() {
     click(&mut h,point(&out,"添加"));
     assert!(!h.app.avoidance.open);
     assert_eq!(h.app.settings.avoid_apps.len(),1);
-    h.app.settings.avoid_browsers=false;h.app.settings.save();
+    h.app.settings.avoid_browsers=false;h.app.settings.save().unwrap();
     let loaded=crate::model::Settings::load();
     assert!(!loaded.avoid_browsers);assert!(loaded.browser_minimal);
     assert_eq!(loaded.avoid_apps,h.app.settings.avoid_apps);
@@ -3937,7 +3964,7 @@ fn avoidance_picker_add_remove_and_save() {
         let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(std::path::Path::new(&dest).join("图标区域.png"),&rgba,600,560,image::ColorType::Rgba8).unwrap();
     }
     click(&mut h,point(&out,"×"));assert!(h.app.settings.avoid_apps.is_empty());
-    h.app.settings.save();assert!(crate::model::Settings::load().avoid_apps.is_empty());
+    h.app.settings.save().unwrap();assert!(crate::model::Settings::load().avoid_apps.is_empty());
 }
 
 #[test]
@@ -4046,7 +4073,7 @@ fn new_mail_notification_masks_codes_in_sender_and_history(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.mail.accounts=vec![crate::mail::Account{email:"a@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true}];
     let item=crate::mail::Item{received_unix:None,account:"a@example.com".into(),from:"登录验证码 123456".into(),subject:"验证码 123456".into(),time:"09:41".into(),code:Some("123456".into()),summary:"验证码 123456".into(),links:vec![],meeting:None,uid:42};
-    h.app.mail_event(crate::mail::Event::Mail{item,new:true});
+    h.app.mail_event(crate::mail::Event::Mail{item,new:true,updates:Vec::new()});
     assert!(!h.app.history.is_empty());
     for alert in h.app.alerts.iter().chain(h.app.history.iter()) {
         assert!(!alert.body.contains("123456"),"通知和历史记录不能留下验证码明文");
@@ -4179,9 +4206,131 @@ fn bluetooth_switch_clears_notices_and_restarts_with_fresh_baseline(){
     assert!(!h.app.alerts.iter().any(|a|a.title=="蓝牙设备"));
     h.app.bluetooth_alert(&device,true);
     assert!(!h.app.alerts.iter().any(|a|a.title=="蓝牙设备"));
-    h.app.settings.save();assert!(!crate::model::Settings::load().bluetooth_notifications);
+    h.app.settings.save().unwrap();assert!(!crate::model::Settings::load().bluetooth_notifications);
     h.bt=vec![device];h.app.settings.bluetooth_notifications=true;h.frame(vec![]);
     assert!(h.app.notice.as_ref().is_none_or(|a|a.title!="蓝牙设备"));
     h.bt.clear();h.frame(vec![]);
     assert!(h.app.notice.as_ref().is_some_and(|a|a.title=="蓝牙设备") || h.app.alerts.iter().any(|a|a.title=="蓝牙设备"));
+}
+
+#[test]
+fn persistence_todos_preserve_reserved_prefixes_and_migrate_legacy_records() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    let dir=crate::model::config_dir();std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("todo.txt"),"o|-|@due:plain task\no|-|@due:2026-12-01 10:00|1|legacy | meeting\nplain|text\n").unwrap();
+    let legacy=crate::model::TodoList::load();
+    assert_eq!(legacy.items.len(),3);assert_eq!(legacy.items[0].text,"@due:plain task");
+    assert_eq!(legacy.items[1].due.as_deref(),Some("2026-12-01 10:00"));assert!(legacy.items[1].reminded);
+    assert_eq!(legacy.items[2].text,"plain|text");
+    let texts=["@due:plain task","@due:2026-12-01 10:00|1|literal text","a|b\nnext\rline","引号 \" 与反斜线 \\"];
+    h.app.todos.items=texts.iter().map(|text|crate::model::TodoItem{text:(*text).into(),done_on:None,due:None,reminded:false}).collect();
+    h.app.todos.save().unwrap();let loaded=crate::model::TodoList::load();
+    assert_eq!(loaded.items.iter().map(|item|item.text.as_str()).collect::<Vec<_>>(),texts);
+    assert!(loaded.items.iter().all(|item|item.due.is_none()&&!item.reminded));
+}
+
+#[test]
+fn persistence_failures_rollback_models_and_preserve_saved_data() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    let dir=crate::model::config_dir();h.app.settings.save().unwrap();
+    h.app.water.start_day="2026-10-28".into();h.app.water.drink(250,9).unwrap();
+    let fixture=dir.join("fixture.txt");std::fs::write(&fixture,"file").unwrap();h.app.shelf.add(&fixture).unwrap();
+    h.app.notification_apps.observe("old-app","原应用").unwrap();
+    let saved_settings=std::fs::read(dir.join("settings.txt")).unwrap();
+    let blocker=dir.join("not-a-directory");std::fs::write(&blocker,"block").unwrap();
+    std::env::set_var("DAOZAI_DATA_DIR",&blocker);
+    let previous=h.app.settings.clone();h.app.settings.sound=!previous.sound;
+    assert!(!h.app.persist_settings(previous.clone()));assert_eq!(h.app.settings.sound,previous.sound);
+    assert!(h.app.todos.save().is_err());assert!(h.app.water.drink(250,9).is_err());assert_eq!(h.app.water.drunk_ml,250);
+    assert!(h.app.shelf.clear().is_err());assert_eq!(h.app.shelf.items,vec![fixture.clone()]);
+    assert!(h.app.shelf.remove(&fixture).is_err());assert_eq!(h.app.shelf.items,vec![fixture.clone()]);
+    assert!(h.app.shelf.add(&dir).is_err());assert_eq!(h.app.shelf.items,vec![fixture.clone()]);
+    assert!(h.app.notification_apps.observe("new-app","新应用").is_err());assert_eq!(h.app.notification_apps.items.len(),1);
+    let previous_apps=h.app.notification_apps.clone();h.app.notification_apps.items[0].2=false;
+    assert!(!h.app.persist_notification_apps(previous_apps));assert!(h.app.notification_apps.items[0].2);
+    std::env::set_var("DAOZAI_DATA_DIR",&dir);
+    assert_eq!(std::fs::read(dir.join("settings.txt")).unwrap(),saved_settings);
+    assert_eq!(crate::model::Water::load("2026-10-28").drunk_ml,250);
+    assert_eq!(crate::model::Shelf::load().items,vec![fixture]);
+    h.app.water.drink(100,9).unwrap();assert_eq!(crate::model::Water::load("2026-10-28").drunk_ml,350);
+}
+
+#[test]
+fn persistence_failed_todo_submit_keeps_draft_for_retry() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    let dir=crate::model::config_dir();std::fs::create_dir_all(&dir).unwrap();
+    let blocker=dir.join("not-a-directory");std::fs::write(&blocker,"block").unwrap();
+    h.app.show_page(4);h.hover(H::local(300.0,60.0),1.0);h.click(H::local(70.0,109.0));
+    h.frame(vec![egui::Event::Text("@due:保留 | 草稿".into())]);
+    std::env::set_var("DAOZAI_DATA_DIR",&blocker);
+    let enter=||egui::Event::Key{key:egui::Key::Enter,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()};
+    h.frame(vec![enter()]);
+    assert!(h.app.adding);assert_eq!(h.app.buf,"@due:保留 | 草稿");assert!(h.app.todos.items.is_empty());
+    h.frame(vec![]);
+    assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text().contains("保存失败"))));
+    std::env::set_var("DAOZAI_DATA_DIR",&dir);
+    h.frame(vec![egui::Event::Key{key:egui::Key::Enter,physical_key:None,pressed:false,repeat:false,modifiers:Default::default()}]);
+    h.frame(vec![enter()]);
+    assert!(!h.app.adding);assert_eq!(crate::model::TodoList::load().items[0].text,"@due:保留 | 草稿");
+}
+
+#[test]
+fn persistence_water_migrates_both_legacy_files_without_losing_progress() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
+    let dir=crate::model::config_dir();std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("water.txt"),"bottle=2000\ngoal=2500\nstart=2026-10-28\n").unwrap();
+    std::fs::write(dir.join("water-extra.txt"),"drunk=750\nrefills=2\nremind=0\nhours=100,200,450\n").unwrap();
+    let water=crate::model::Water::load("2026-10-28");assert_eq!(water.drunk_ml,750);assert!(!water.remind);
+    water.save().unwrap();
+    std::fs::write(dir.join("water-extra.txt"),"drunk=0\n").unwrap();
+    let loaded=crate::model::Water::load("2026-10-28");assert_eq!(loaded.drunk_ml,750);assert_eq!(loaded.hours[2],450);assert_eq!(loaded.goal_ml,2500);assert_eq!(loaded.refills,2);assert!(!loaded.remind);
+    assert_eq!(crate::model::Water::load("2026-10-29").drunk_ml,0);
+}
+
+#[test]
+fn persistence_load_failures_remain_blocked_after_storage_recovers() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
+    let dir=crate::model::config_dir();
+    let originals=[("settings.txt","focus_minutes=45\n"),("todo.txt","o|-|原任务\n"),("water.txt","format=2\nstart=2026-10-28\ndrunk=900\n"),("shelf.txt","C:\\original.txt\n"),("notification-apps.json","[{\"id\":\"old\",\"name\":\"原应用\",\"enabled\":false}]")];
+    for (name,_) in originals {std::fs::create_dir(dir.join(name)).unwrap();}
+    let mut settings=crate::model::Settings::load();let mut todos=crate::model::TodoList::load();
+    let mut water=crate::model::Water::load("2026-10-28");let mut shelf=crate::model::Shelf::load();let apps=crate::model::NotificationApps::load();
+    assert!([&settings.load_error,&todos.load_error,&water.load_error,&shelf.load_error,&apps.load_error].iter().all(|error|error.is_some()));
+    // A directory gives a deterministic read error; restoring each regular file
+    // models permission recovery without allowing the old empty state to overwrite it.
+    for (name,contents) in originals {std::fs::remove_dir(dir.join(name)).unwrap();std::fs::write(dir.join(name),contents).unwrap();}
+    settings.focus_minutes=5;assert!(settings.save().is_err());
+    todos.items.push(crate::model::TodoItem{text:"新任务".into(),due:None,done_on:None,reminded:false});assert!(todos.save().is_err());
+    assert!(water.drink(250,9).is_err());assert!(shelf.clear().is_err());assert!(apps.save().is_err());
+    for (name,contents) in originals {assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(),contents);}
+    let loaded=crate::model::TodoList::load();assert_eq!(loaded.items[0].text,"原任务");loaded.save().unwrap();
+    assert_eq!(crate::model::Settings::load().focus_minutes,45);assert_eq!(crate::model::Water::load("2026-10-28").drunk_ml,900);
+}
+
+#[test]
+fn persistence_invalid_todo_json_never_partially_loads_or_overwrites() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();let path=crate::model::config_dir().join("todo.txt");
+    for raw in [
+        "{\"version\":1,\"items\":[",
+        "{\"version\":2,\"items\":[]}",
+        "{\"version\":1,\"items\":[{\"text\":\"保留\",\"due\":null,\"done_on\":null,\"reminded\":false},{\"text\":123}]}",
+        "{\"version\":1,\"items\":[{\"text\":\"保留\",\"due\":null,\"done_on\":null,\"reminded\":\"false\"}]}",
+    ] {
+        std::fs::write(&path,raw).unwrap();let mut list=crate::model::TodoList::load();
+        assert!(list.load_error.is_some());assert!(list.items.is_empty(),"不允许只读入部分条目");
+        list.items.push(crate::model::TodoItem{text:"新任务".into(),due:None,done_on:None,reminded:false});
+        assert!(list.save().is_err());assert_eq!(std::fs::read_to_string(&path).unwrap(),raw);
+    }
+}
+
+#[test]
+fn persistence_water_partial_legacy_read_cannot_erase_progress() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();let dir=crate::model::config_dir();
+    let main="bottle=2000\ngoal=2500\nstart=2026-10-28\n";
+    std::fs::write(dir.join("water.txt"),main).unwrap();std::fs::create_dir(dir.join("water-extra.txt")).unwrap();
+    let mut water=crate::model::Water::load("2026-10-28");assert!(water.load_error.is_some());
+    std::fs::remove_dir(dir.join("water-extra.txt")).unwrap();std::fs::write(dir.join("water-extra.txt"),"drunk=750\n").unwrap();
+    assert!(water.drink(250,9).is_err());assert_eq!(std::fs::read_to_string(dir.join("water.txt")).unwrap(),main);
+    let mut restored=crate::model::Water::load("2026-10-28");assert_eq!(restored.drunk_ml,750);restored.drink(250,9).unwrap();
+    assert_eq!(crate::model::Water::load("2026-10-28").drunk_ml,1000);
 }

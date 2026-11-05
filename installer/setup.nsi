@@ -7,11 +7,14 @@ Unicode true
 !include "FileFunc.nsh"
 
 !ifndef APP_ID
-  !define APP_ID "Daozai"
+  ; 正式打包时由 scripts/package.ps1 从 src/brand.rs 读取并传入。
+  !define APP_ID "DaozaiFork"
 !endif
 !ifndef APP_NAME
   !define APP_NAME "岛仔"
 !endif
+; UI 名称可保持一致，系统入口必须包含独立产品标识。
+!define SHORTCUT_NAME "${APP_NAME}（${APP_ID}）"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 Name "${APP_NAME}"
 OutFile "${OUTPUT_FILE}"
@@ -65,7 +68,7 @@ Function .onInit
   StrCpy $AutoStartChoice 0
   ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
   ${If} $0 != ""
-    IfFileExists "$DESKTOP\${APP_NAME}.lnk" +2 0
+    IfFileExists "$DESKTOP\${SHORTCUT_NAME}.lnk" +2 0
       StrCpy $DesktopChoice 0
   ${EndIf}
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
@@ -197,18 +200,18 @@ Section "安装"
   File "${PROJECT_DIR}\THIRD_PARTY_NOTICES.txt"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   ${If} $DesktopChoice == 1
-    CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\daozai.exe"
+    CreateShortcut "$DESKTOP\${SHORTCUT_NAME}.lnk" "$INSTDIR\daozai.exe"
   ${Else}
-    Delete "$DESKTOP\${APP_NAME}.lnk"
+    Delete "$DESKTOP\${SHORTCUT_NAME}.lnk"
   ${EndIf}
   ${If} $AutoStartChoice == 1
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}" '"$INSTDIR\daozai.exe"'
   ${Else}
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
   ${EndIf}
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\daozai.exe"
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}设置.lnk" "$INSTDIR\daozai.exe" "--settings"
-  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME} Daozai"
+  CreateShortcut "$SMPROGRAMS\${SHORTCUT_NAME}.lnk" "$INSTDIR\daozai.exe"
+  CreateShortcut "$SMPROGRAMS\${SHORTCUT_NAME}设置.lnk" "$INSTDIR\daozai.exe" "--settings"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${SHORTCUT_NAME}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "岛仔"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
@@ -234,14 +237,18 @@ Section "Uninstall"
   Delete "$INSTDIR\THIRD_PARTY_NOTICES.txt"
   Delete "$INSTDIR\uninstall.ps1"
   Delete "$INSTDIR\Uninstall.exe"
-  Delete "$DESKTOP\${APP_NAME}.lnk"
-  Delete "$SMPROGRAMS\${APP_NAME}.lnk"
-  Delete "$SMPROGRAMS\${APP_NAME}设置.lnk"
+  ; 换目录安装后，旧卸载器只卸载自己的文件，不能移除新安装的系统入口。
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  ${If} $0 == $INSTDIR
+    Delete "$DESKTOP\${SHORTCUT_NAME}.lnk"
+    Delete "$SMPROGRAMS\${SHORTCUT_NAME}.lnk"
+    Delete "$SMPROGRAMS\${SHORTCUT_NAME}设置.lnk"
+    DeleteRegKey HKCU "${UNINSTALL_KEY}"
+  ${EndIf}
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
   ${If} $0 == '"$INSTDIR\daozai.exe"'
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
   ${EndIf}
-  DeleteRegKey HKCU "${UNINSTALL_KEY}"
   ; 只移除空的安装目录，用户数据和用户自行放入的文件都保留。
   RMDir "$INSTDIR"
 SectionEnd

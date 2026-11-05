@@ -181,10 +181,11 @@ impl App {
         self.settings.ignored_mail_events.contains(&calendar::dedupe_key(event))
     }
     pub(crate) fn toggle_mail_event(&mut self,event:&mail::Meeting) {
+        let previous = self.settings.clone();
         let key=calendar::dedupe_key(event);
         if self.mail_event_ignored(event){self.settings.ignored_mail_events.retain(|k|k!=&key);}
         else{self.settings.ignored_mail_events.push(key);}
-        self.settings.save();
+        if !self.persist_settings(previous) {return;}
     }
 
     pub fn open_calendar(&mut self, meeting:Option<mail::Meeting>) {

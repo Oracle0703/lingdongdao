@@ -4,9 +4,12 @@ if(-not $SourceExecutable){
     $SourceExecutable=if(Test-Path -LiteralPath $packaged){$packaged}else{Join-Path $PSScriptRoot '..\target\release\daozai.exe'}
 }
 $ErrorActionPreference='Stop'
+# 与 src/brand.rs 的 APP_ID 保持一致。
+$appId='DaozaiFork'
+$shortcutName="岛仔（$appId）"
 $sourcePath=[System.IO.Path]::GetFullPath($SourceExecutable)
 if(-not(Test-Path -LiteralPath $sourcePath)){throw '找不到岛仔程序，请先完成构建。'}
-$installDir=Join-Path $env:LOCALAPPDATA 'Programs\Daozai'
+$installDir=Join-Path $env:LOCALAPPDATA ('Programs\'+$appId)
 $exePath=Join-Path $installDir 'daozai.exe'
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 Get-Process daozai -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $exePath} | ForEach-Object {
@@ -20,19 +23,19 @@ if(Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\LICENSE')){Copy-Item -Lit
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'uninstall.ps1') -Destination (Join-Path $installDir 'uninstall.ps1') -Force
 $shell=New-Object -ComObject WScript.Shell
 $entries=@(
-    @((Join-Path $shell.SpecialFolders.Item('Desktop') '岛仔.lnk'),''),
-    @((Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\岛仔.lnk'),''),
-    @((Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\岛仔设置.lnk'),'--settings')
+    @((Join-Path $shell.SpecialFolders.Item('Desktop') "$shortcutName.lnk"),''),
+    @((Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$shortcutName.lnk"),''),
+    @((Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\${shortcutName}设置.lnk"),'--settings')
 )
 foreach($entry in $entries){
     $link=$shell.CreateShortcut($entry[0]);$link.TargetPath=$exePath;$link.Arguments=$entry[1]
     $link.WorkingDirectory=$installDir;$link.IconLocation=$exePath+',0';$link.Description='岛仔 Daozai';$link.Save()
 }
-$key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Daozai'
+$key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\'+$appId
 New-Item -Path $key -Force | Out-Null
 $version=(Get-Item -LiteralPath $exePath).VersionInfo.FileVersion
 $psExe=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$values=@{DisplayName='岛仔 Daozai';DisplayVersion=$version;Publisher='岛仔';InstallLocation=$installDir;DisplayIcon=$exePath+',0';UninstallString=('"'+$psExe+'" -NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $installDir 'uninstall.ps1')+'"')}
+$values=@{DisplayName=$shortcutName;DisplayVersion=$version;Publisher='岛仔';InstallLocation=$installDir;DisplayIcon=$exePath+',0';UninstallString=('"'+$psExe+'" -NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $installDir 'uninstall.ps1')+'"')}
 foreach($name in $values.Keys){New-ItemProperty -Path $key -Name $name -Value $values[$name] -PropertyType String -Force | Out-Null}
 foreach($name in @('NoModify','NoRepair')){New-ItemProperty -Path $key -Name $name -Value 1 -PropertyType DWord -Force | Out-Null}
 Start-Process -FilePath $exePath -WorkingDirectory $installDir -WindowStyle Hidden

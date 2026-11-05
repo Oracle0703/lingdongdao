@@ -235,7 +235,11 @@ impl App {
     pub fn receive_notification(&mut self, app:String, id:String, body:String){
         if !self.settings.read_notifications || id.is_empty(){return;}
         if self.history.iter().any(|a|format!("{} · {}",a.title,a.body)==body){return;}
-        if !self.notification_apps.observe(&id,&app) || !self.settings.notifications{return;}
+        match self.notification_apps.observe(&id,&app) {
+            Ok(true) if self.settings.notifications=>{},
+            Ok(_)=>return,
+            Err(error)=>{self.say(format!("通知应用记录保存失败：{error}"));return;},
+        }
         self.notification_bell_at=self.t;
         self.notification_bell_until=self.t+4.5;
         let title=app.chars().filter(|c|!c.is_control()).take(80).collect();
@@ -439,7 +443,7 @@ impl App {
         let amount = self.settings.serving_ml;
         let was = self.water.percent();
         let before = self.water.drunk_ml;
-        self.water.drink(amount, hour);
+        if let Err(error)=self.water.drink(amount,hour){self.say(format!("饮水记录保存失败，请重试：{error}"));return;}
         let amount = self.water.drunk_ml.saturating_sub(before);
         self.last_drink = Some((amount, hour));
         self.last_reminder = self.t;
@@ -537,7 +541,7 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度"];
+        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度与模型", "AI 额度与模型"];
         for (tab, expected) in groups.iter().enumerate() {
             let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,start,end)| (*start..=*end).contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
@@ -659,7 +663,12 @@ impl App {
         if d.text.trim().is_empty(){d.error="请填写任务内容".into();}
         else if due.is_none(){d.error="时间格式应为 18:30 或完整日期时间".into();}
         else if self.todos.items.get(d.index).is_none_or(|t|t.text!=d.original){d.error="任务已变化，请取消后重新打开".into();}
-        else{let item=&mut self.todos.items[d.index];item.text=d.text.trim().into();item.due=due.unwrap();item.reminded=false;self.todos.save();self.say("待办已保存");return;}
+        else{
+            let previous=self.todos.clone();
+            let item=&mut self.todos.items[d.index];item.text=d.text.trim().into();item.due=due.unwrap();item.reminded=false;
+            if let Err(error)=self.todos.save(){self.todos=previous;d.error=format!("保存失败，请重试：{error}");}
+            else{self.say("待办已保存");return;}
+        }
         self.task_dialog=Some(d);
     }
 }
@@ -678,7 +687,8 @@ impl App {
     pub(crate) fn page_settings(&mut self,c:&Card) {
         let help=match self.settings_category{0=>"外观与系统",1=>"调整饮水量与提醒时间",2=>"调整每个阶段的时长",_=>"通知"};
         c.text(44.0,44.0,help,10.5,W::Regular,theme::GRAY,H::Left);
-        let before=format!("{:?}",self.settings);
+        let before=self.settings.clone();
+        let previous_water=self.water.clone();
         match self.settings_category {
             0=>{
                 let choices=[("吉祥物",self.settings.pet),("极简刘海",self.settings.minimal),("系统提示",self.settings.system_hud),("全屏隐藏",self.settings.hide_fullscreen)];
@@ -688,8 +698,8 @@ impl App {
             1=>{
                 let rows=[("每次",format!("{} ml",self.settings.serving_ml)),("间隔",format!("{} 分",self.settings.water_minutes)),("目标",format!("{:.1} L",self.water.goal_ml as f32/1000.0))];
                 for (i,(label,value)) in rows.iter().enumerate(){let y=53.0+i as f32*23.0;c.text(44.0,y+13.0,label,10.5,W::Regular,theme::GRAY,H::Left);c.text(148.0,y+13.0,value,10.5,W::Semibold,theme::WHITE,H::Center);
-                    if setting_button(c,90.0,y,25.0,"−",false,&format!("water-minus-{i}")){match i{0=>self.settings.serving_ml=self.settings.serving_ml.saturating_sub(50).max(50),1=>self.settings.water_minutes=self.settings.water_minutes.saturating_sub(5).max(5),_=>{self.water.goal_ml=self.water.goal_ml.saturating_sub(250).max(500);self.water.save();}}}
-                    if setting_button(c,180.0,y,25.0,"+",false,&format!("water-plus-{i}")){match i{0=>self.settings.serving_ml=(self.settings.serving_ml+50).min(1000),1=>self.settings.water_minutes=(self.settings.water_minutes+5).min(180),_=>{self.water.goal_ml=(self.water.goal_ml+250).min(6000);self.water.save();}}}}
+                    if setting_button(c,90.0,y,25.0,"−",false,&format!("water-minus-{i}")){match i{0=>self.settings.serving_ml=self.settings.serving_ml.saturating_sub(50).max(50),1=>self.settings.water_minutes=self.settings.water_minutes.saturating_sub(5).max(5),_=>self.water.goal_ml=self.water.goal_ml.saturating_sub(250).max(500)}}
+                    if setting_button(c,180.0,y,25.0,"+",false,&format!("water-plus-{i}")){match i{0=>self.settings.serving_ml=(self.settings.serving_ml+50).min(1000),1=>self.settings.water_minutes=(self.settings.water_minutes+5).min(180),_=>self.water.goal_ml=(self.water.goal_ml+250).min(6000)}}}
                 c.text(223.0,66.0,"提醒时段",10.5,W::Semibold,theme::WHITE,H::Left);
                 for i in 0..2 {let y=73.0+i as f32*23.0;let hour=if i==0{self.settings.water_start}else{self.settings.water_end};c.text(250.0,y+13.0,&format!("{:02}:00",hour),10.5,W::Bold,theme::WHITE,H::Center);
                     if setting_button(c,287.0,y,25.0,"−",false,&format!("hour-minus-{i}")){if i==0{self.settings.water_start=(hour+23)%24}else{self.settings.water_end=(hour+23)%24}}
@@ -709,7 +719,8 @@ impl App {
                 let status=c.fit(&self.listener_status,10.5,W::Regular,170.0);c.text(210.0,97.0,&status,10.5,W::Regular,theme::GRAY,H::Left);
             }
         }
-        if before!=format!("{:?}",self.settings){self.settings.save();self.last_reminder=self.t;}
+        if format!("{before:?}")!=format!("{:?}",self.settings) && self.persist_settings(before){self.last_reminder=self.t;}
+        if previous_water.goal_ml!=self.water.goal_ml {self.persist_water(previous_water);}
     }
 }
 
@@ -860,7 +871,7 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
 }
 const SETTINGS_GROUPS: [(&str,usize,usize);8] = [
     ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3),
-    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("关于",9,9),
+    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度与模型",11,12), ("关于",9,9),
 ];
 
 impl App {
@@ -887,7 +898,7 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
             if ctx.input(|i|i.viewport().close_requested()){self.settings_open=false;}
-            let before=format!("{:?}",self.settings);
+            let before=self.settings.clone();
             egui::SidePanel::left("settings-sidebar").resizable(false).exact_width(180.0).frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(29,29,32),Color32::from_rgb(237,239,243))).stroke(egui::Stroke::new(1.0,settings_color(ctx,Color32::from_rgb(42,42,45),Color32::from_rgb(216,219,225)))).inner_margin(egui::Margin::symmetric(10,12))).show(ctx,|ui|{
                 ui.add_space(5.0);
                 ui.label(egui::RichText::new("设置").size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105))));
@@ -928,8 +939,8 @@ impl App {
                 ui.visuals_mut().widgets.hovered.corner_radius=egui::CornerRadius::same(6);
                 ui.visuals_mut().widgets.active.corner_radius=egui::CornerRadius::same(6);
                 ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
-                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度"];
-                ui.label(egui::RichText::new(titles[self.settings_tab.min(11)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","大模型"];
+                ui.label(egui::RichText::new(titles[self.settings_tab.min(12)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
                 if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
                     if start!=end {
                         ui.add_space(7.0);
@@ -951,6 +962,7 @@ impl App {
                 egui::ScrollArea::vertical().id_salt(("settings-scroll",self.settings_tab)).auto_shrink([false,false]).show(ui,|ui|{
                     match self.settings_tab {
                     11=>self.quota_settings(ui),
+                    12=>self.llm_settings(ui),
                     10=>{
                         ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                         settings_label(ui,"常驻排列");
@@ -1108,11 +1120,11 @@ impl App {
                     3=>{
                         settings_label(ui,"喝水提醒");
                         settings_card(ui,|ui|{
-                            let old_remind=self.water.remind;
+                            let previous_water=self.water.clone();
                             setting_row(ui,"定时提醒","达到每日目标后停止提醒",&mut self.water.remind);
-                            if self.water.remind!=old_remind{self.water.save();self.last_reminder=self.t;}
                             ui.separator();
-                            if setting_number(ui,"每日目标",&mut self.water.goal_ml,500,6000," ml",50.0){self.water.save();}
+                            setting_number(ui,"每日目标",&mut self.water.goal_ml,500,6000," ml",50.0);
+                            if (self.water.remind!=previous_water.remind || self.water.goal_ml!=previous_water.goal_ml) && self.persist_water(previous_water){self.last_reminder=self.t;}
                             setting_number(ui,"每次记录",&mut self.settings.serving_ml,50,1000," ml",25.0);
                             setting_number(ui,"提醒间隔",&mut self.settings.water_minutes,5,180," 分钟",1.0);
                             settings_control_row(ui,"提醒时段",80.0,|ui|{
@@ -1160,9 +1172,9 @@ impl App {
                             ui.separator();
                             setting_row(ui,"显示通知正文","可能包含私密消息；屏幕共享时建议关闭",&mut self.settings.notification_preview);
                             ui.label(egui::RichText::new("收到通知的应用会出现在这里，可分别开启或关闭。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            let before_apps=self.notification_apps.items.clone();
+                            let before_apps=self.notification_apps.clone();
                             for (_,name,enabled) in &mut self.notification_apps.items {setting_row(ui,name,"",enabled);}
-                            if before_apps!=self.notification_apps.items{self.notification_apps.save();}
+                            if before_apps.items!=self.notification_apps.items{self.persist_notification_apps(before_apps);}
                         });
                     }
                     7=>{
@@ -1430,7 +1442,7 @@ impl App {
                 });
             });
             self.avoidance.dialog(ctx,&mut self.settings);
-            if before!=format!("{:?}",self.settings){self.settings.save();}
+            if format!("{before:?}")!=format!("{:?}",self.settings){self.persist_settings(before);}
             ctx.set_style(original_style);
         });
     }

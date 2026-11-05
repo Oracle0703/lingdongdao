@@ -1,14 +1,23 @@
-param([Parameter(Mandatory=$true)][string]$WorkPath, [Parameter(Mandatory=$true)][string]$TargetExe, [int]$ParentProcessId)
+param([Parameter(Mandatory=$true)][string]$WorkPath, [Parameter(Mandatory=$true)][string]$TargetExe, [int]$ParentProcessId, [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9._-]+$')][string]$AppId, [switch]$Quiet)
 $ErrorActionPreference = 'Stop'
 # 更新只使用当前 PowerShell 自带模块，避免继承其他终端版本的模块路径。
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
-$cacheRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Daozai\Updates')).TrimEnd('\')
+$cacheRoot = [IO.Path]::GetFullPath((Join-Path (Join-Path $env:LOCALAPPDATA $AppId) 'Updates')).TrimEnd('\')
 $workRoot = [IO.Path]::GetFullPath($WorkPath).TrimEnd('\')
 $target = [IO.Path]::GetFullPath($TargetExe)
 $targetDir = Split-Path $target -Parent
-$staged = Join-Path $targetDir ('daozai-update-' + [Guid]::NewGuid().ToString('N') + '.exe')
-$backup = Join-Path $workRoot 'previous.exe'
-$replaced = $false
+$transaction = [Guid]::NewGuid().ToString('N')
+# 最后替换程序；在全部文件就绪前不启动新版。
+$files = @('LICENSE', 'THIRD_PARTY_NOTICES.txt', 'daozai.exe') | ForEach-Object {
+    [pscustomobject]@{
+        Name = $_
+        Target = $(if ($_ -eq 'daozai.exe') { $target } else { Join-Path $targetDir $_ })
+        Staged = Join-Path $targetDir ('.daozai-update-' + $transaction + '-' + $_)
+        Backup = Join-Path $workRoot ('previous-' + $_)
+        Existed = $false
+        Applied = $false
+    }
+}
 $exited = $false
 function Assert-PlainPath([string]$PathToCheck) {
     $ancestor = [IO.Path]::GetFullPath($PathToCheck)
@@ -30,12 +39,17 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($archive)
     try {
-        $name = 'Daozai-v' + $version + '-windows-x64/daozai.exe'
-        $entries = @($zip.Entries | Where-Object {$_.FullName.Replace('\','/') -ceq $name})
-        if ($entries.Count -ne 1 -or $entries[0].Length -gt 200MB) { throw '更新包中缺少唯一的岛仔程序。' }
-        [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $staged)
+        foreach ($file in $files) {
+            Assert-PlainPath $file.Target
+            if ((Test-Path -LiteralPath $file.Target) -and -not (Test-Path -LiteralPath $file.Target -PathType Leaf)) { throw "更新目标不是文件：$($file.Name)" }
+            $name = 'Daozai-v' + $version + '-windows-x64/' + $file.Name
+            $entries = @($zip.Entries | Where-Object {$_.FullName.Replace('\','/') -ceq $name})
+            $limit = if ($file.Name -eq 'daozai.exe') { 200MB } else { 32MB }
+            if ($entries.Count -ne 1 -or $entries[0].Length -eq 0 -or $entries[0].Length -gt $limit) { throw "更新包中缺少唯一且有效的文件：$($file.Name)" }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $file.Staged)
+        }
     } finally { $zip.Dispose() }
-    $actual = [Diagnostics.FileVersionInfo]::GetVersionInfo($staged).FileVersion
+    $actual = [Diagnostics.FileVersionInfo]::GetVersionInfo($files[-1].Staged).FileVersion
     if ($actual -ne $version -and $actual -ne "$version.0") { throw '安装包版本不匹配。' }
     Set-Content -LiteralPath (Join-Path $workRoot 'ready') -Value 'ok'
     if ($ParentProcessId -gt 0) {
@@ -43,14 +57,20 @@ try {
         if ($parent -and -not $parent.WaitForExit(60000)) { throw '岛仔尚未退出，请稍后重试。' }
     }
     $exited = $true
-    # 缓存可能启用 EFS；先复制备份，避免原子替换时跨加密边界移动旧程序。
-    [IO.File]::Copy($target, $backup, $true)
-    [IO.File]::Replace($staged, $target, [NullString]::Value)
-    $replaced = $true
+    # 先备份所有旧文件，再开始替换；复制允许缓存与安装目录使用不同 EFS 设置。
+    foreach ($file in $files) {
+        $file.Existed = Test-Path -LiteralPath $file.Target -PathType Leaf
+        if ($file.Existed) { [IO.File]::Copy($file.Target, $file.Backup, $true) }
+    }
+    foreach ($file in $files) {
+        if ($file.Existed) { [IO.File]::Replace($file.Staged, $file.Target, [NullString]::Value) }
+        else { [IO.File]::Move($file.Staged, $file.Target) }
+        $file.Applied = $true
+    }
     Start-Process -FilePath $target -WorkingDirectory $targetDir -WindowStyle Hidden
-    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Daozai'
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\' + $AppId
     $registered = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
-    if ($registered -and [string]::Equals($registered.InstallLocation.TrimEnd('\'), $targetDir, [StringComparison]::OrdinalIgnoreCase)) {
+    if ($registered -and [string]::Equals(([string]$registered.InstallLocation).TrimEnd('\'), $targetDir, [StringComparison]::OrdinalIgnoreCase)) {
         Set-ItemProperty -LiteralPath $key -Name DisplayVersion -Value $version -ErrorAction SilentlyContinue
     }
     # 只清理已经确认位于专用缓存内的本次更新目录。
@@ -59,16 +79,31 @@ try {
     }
 } catch {
     $message = $_.Exception.Message
-    if ($replaced -and (Test-Path -LiteralPath $backup)) { [IO.File]::Copy($backup, $target, $true) }
-    if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force }
-    if (-not $exited) {
-        if ($workRoot.StartsWith($cacheRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
-            [IO.File]::WriteAllText((Join-Path $workRoot 'error.txt'), $message)
-        }
-        exit 1
+    $rollbackErrors = @()
+    for ($i = $files.Count - 1; $i -ge 0; $i--) {
+        $file = $files[$i]
+        try {
+            if ($file.Applied) {
+                if ($file.Existed) { [IO.File]::Copy($file.Backup, $file.Target, $true) }
+                else { Remove-Item -LiteralPath $file.Target -Force }
+            }
+            if (Test-Path -LiteralPath $file.Staged) { Remove-Item -LiteralPath $file.Staged -Force }
+        } catch { $rollbackErrors += "$($file.Name)：$($_.Exception.Message)" }
     }
-    if ($exited) { Start-Process -FilePath $target -WorkingDirectory $targetDir -WindowStyle Hidden }
-    Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.MessageBox]::Show("更新未完成：$message`r`n原版本已保留，可稍后重试或通过浏览器下载。", '岛仔更新') | Out-Null
+    if ($rollbackErrors.Count) { $message += "`r`n恢复未完成，备份保留在 ${workRoot}：" + ($rollbackErrors -join '；') }
+    if ($workRoot.StartsWith($cacheRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        try {
+            Assert-PlainPath $workRoot
+            [IO.File]::WriteAllText((Join-Path $workRoot 'error.txt'), $message)
+        } catch { }
+    }
+    if ($exited -and $ParentProcessId -gt 0 -and -not $rollbackErrors.Count) {
+        try { Start-Process -FilePath $target -WorkingDirectory $targetDir -WindowStyle Hidden } catch { }
+    }
+    if ($exited -and -not $Quiet) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $recovery = if ($rollbackErrors.Count) { '请使用保留的备份恢复，或通过浏览器下载安装。' } else { '原版本已保留，可稍后重试或通过浏览器下载。' }
+        [System.Windows.Forms.MessageBox]::Show("更新未完成：$message`r`n$recovery", '岛仔更新') | Out-Null
+    }
     exit 1
 }

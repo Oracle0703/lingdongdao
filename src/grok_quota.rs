@@ -82,7 +82,7 @@ fn native_session(account:&Account)->Result<Session,String>{
 #[cfg(windows)]
 fn credential(slot:&str)->Result<keyring::Entry,String>{
     if slot.len()!=64 || !slot.bytes().all(|b|b.is_ascii_hexdigit()){return Err(LOGIN_ERROR.into());}
-    keyring::Entry::new("Daozai.GrokBot",slot).map_err(|_|"无法打开 Windows 凭据管理器".into())
+    keyring::Entry::new(concat!(crate::app_id!(),".GrokBot"),slot).map_err(|_|"无法打开 Windows 凭据管理器".into())
 }
 #[cfg(windows)]
 fn save_session(slot:&str,value:&Session)->Result<(),String>{
