@@ -58,6 +58,8 @@ impl Effort {
 pub struct Config {
     /// 总开关；关闭时 [`Client::from_saved`] 拒绝创建客户端，不会发送任何内容。
     pub enabled: bool,
+    /// 打开普通邮件详情时生成摘要；仅在总开关同时启用且配置已保存时生效。
+    pub mail_digest: bool,
     pub base_url: String,
     pub model: String,
     pub effort: Effort,
@@ -68,6 +70,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             enabled: false,
+            mail_digest: false,
             base_url: String::new(),
             model: "gpt-oss-20b".into(),
             effort: Effort::Low,
@@ -84,6 +87,7 @@ impl Config {
         for (key, value) in crate::model::read_kv(&crate::model::config_dir().join(CONFIG_FILE)) {
             match key.as_str() {
                 "enabled" => config.enabled = value == "1",
+                "mail_digest" => config.mail_digest = value == "1",
                 "base_url" => config.base_url = value,
                 "model" => config.model = value,
                 "effort" => config.effort = Effort::parse(&value),
@@ -103,6 +107,7 @@ impl Config {
             &crate::model::config_dir().join(CONFIG_FILE),
             &[
                 ("enabled".into(), (self.enabled as u8).to_string()),
+                ("mail_digest".into(), (self.mail_digest as u8).to_string()),
                 ("base_url".into(), clean(&self.base_url)),
                 ("model".into(), clean(&self.model)),
                 ("effort".into(), self.effort.key().into()),
@@ -466,13 +471,13 @@ pub mod secrets {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Write;
     use std::net::TcpListener;
 
     /// 只接收一次请求的本地 HTTP 服务；返回地址和收到的原始请求。
-    fn serve_once(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
+    pub(crate) fn serve_once(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
         let response = format!(
@@ -624,17 +629,22 @@ mod tests {
         assert_eq!(Config::load(), Config::default());
         let config = Config {
             enabled: true,
+            mail_digest: true,
             base_url: " http://10.0.0.5:8000/v1\n".into(),
             model: "gpt-oss-120b".into(),
             effort: Effort::High,
             timeout_secs: 120,
         };
         config.save().unwrap();
+        assert!(std::fs::read_to_string(dir.join(CONFIG_FILE)).unwrap().lines().any(|line| line == "mail_digest=1"));
         let loaded = Config::load();
         assert_eq!(loaded, Config { base_url: "http://10.0.0.5:8000/v1".into(), ..config });
         std::fs::write(dir.join(CONFIG_FILE), "timeout_secs=99999\neffort=bogus\n").unwrap();
         let loaded = Config::load();
         assert_eq!((loaded.timeout_secs, loaded.effort), (600, Effort::Low));
+        assert!(!loaded.mail_digest, "旧配置未声明邮件摘要时必须默认关闭");
+        loaded.save().unwrap();
+        assert!(std::fs::read_to_string(dir.join(CONFIG_FILE)).unwrap().lines().any(|line| line == "mail_digest=0"));
         match old {
             Some(old) => std::env::set_var("DAOZAI_DATA_DIR", old),
             None => std::env::remove_var("DAOZAI_DATA_DIR"),

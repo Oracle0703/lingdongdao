@@ -796,6 +796,17 @@ impl App {
         content.style_mut().spacing.scroll.floating=false;
         content.spacing_mut().scroll.bar_width=4.0*c.s;
         egui::ScrollArea::vertical().id_salt(("mail-body",&item.account,item.uid)).max_height(90.0*c.s).auto_shrink([false,false]).show(&mut content,|ui|{
+            if crate::mail_digest::eligible(raw) {
+                if c.live {self.mail.digests.request(raw,ui.ctx());}
+                match self.mail.digests.get(raw).cloned() {
+                    Some(crate::mail_digest::Digest::Pending)=>{ui.label(egui::RichText::new("AI 摘要生成中…").font(c.font(12.0,W::Regular)).color(theme::GRAY));},
+                    Some(crate::mail_digest::Digest::Ready(text))=>{ui.add(egui::Label::new(egui::RichText::new(format!("AI 摘要：{text}")).font(c.font(12.0,W::Regular)).color(theme::BLUE)).wrap()).on_hover_text("由自建大模型生成，仅供参考");},
+                    Some(crate::mail_digest::Digest::Failed(error))=>{
+                        if ui.add(egui::Link::new(egui::RichText::new("AI 摘要失败，点击重试").font(c.font(12.0,W::Regular)).color(theme::GRAY))).on_hover_text(error).clicked(){self.mail.digests.retry(raw,ui.ctx());}
+                    },
+                    None=>{},
+                }
+            }
             if !item.summary.is_empty() {
                 ui.add(egui::Label::new(egui::RichText::new(item.summary.as_ref()).font(c.font(12.0,W::Regular)).color(Color32::from_gray(220))).wrap());
             }else if item.links.is_empty(){

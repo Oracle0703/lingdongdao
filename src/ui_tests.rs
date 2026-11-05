@@ -879,11 +879,12 @@ fn llm_settings_show_every_field_inside_the_small_settings_window(){
         let _=h.ctx.run(raw,|ctx|h.app.settings_ui(ctx,false));
         shapes=output.lock().unwrap().take().unwrap().shapes;
     }
-    for text in ["AI 额度与模型","AI 额度","大模型","启用大模型","接口地址","模型","API Key","推理强度","超时","测试连接","获取模型列表","保存"]{
-        let rect=shapes.iter().find_map(|shape|match &shape.shape{
-            egui::Shape::Text(t)if t.galley.text()==text=>Some(t.visual_bounding_rect()),_=>None,
+    for text in ["AI 额度与模型","AI 额度","大模型","启用大模型","邮件摘要","接口地址","模型","API Key","推理强度","超时","测试连接","获取模型列表","保存"]{
+        let (rect,clip)=shapes.iter().find_map(|shape|match &shape.shape{
+            egui::Shape::Text(t)if t.galley.text()==text=>Some((t.visual_bounding_rect(),shape.clip_rect)),_=>None,
         }).unwrap_or_else(||panic!("大模型设置缺少 {text}"));
         assert!(Rect::from_min_max(Pos2::ZERO,egui::pos2(600.0,450.0)).contains_rect(rect),"{text} 应完整显示在窗口内：{rect:?}");
+        assert!(clip.expand(1.0).contains_rect(rect),"{text} 不能被滚动区裁剪：{rect:?} / {clip:?}");
     }
 }
 
@@ -4293,4 +4294,188 @@ fn persistence_water_partial_legacy_read_cannot_erase_progress() {
     assert!(water.drink(250,9).is_err());assert_eq!(std::fs::read_to_string(dir.join("water.txt")).unwrap(),main);
     let mut restored=crate::model::Water::load("2026-10-28");assert_eq!(restored.drunk_ml,750);restored.drink(250,9).unwrap();
     assert_eq!(crate::model::Water::load("2026-10-28").drunk_ml,1000);
+}
+
+fn digest_test_mail() -> crate::mail::Item {
+    crate::mail::Item {received_unix:None,account:"digest-test@example.com".into(),from:"产品团队".into(),subject:"评审安排".into(),time:"09:41".into(),code:None,summary:"原始邮件正文保持可读。".into(),links:vec![],meeting:None,uid:420}
+}
+
+fn digest_open_island(h:&mut H,item:&crate::mail::Item) {
+    h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:item.account.clone(),provider:crate::mail::Provider::Qq,enabled:true}];
+    h.app.mail.recent=vec![item.clone()];h.app.mail.open_uid=Some((item.account.clone(),item.uid));
+    h.app.show_page(5);h.hover(H::local(270.0,150.0),1.0);
+}
+
+fn digest_reader_frame(h:&mut H,item:&crate::mail::Item) {
+    digest_reader_frame_with_events(h,item,vec![]);
+}
+
+fn digest_reader_frame_with_events(h:&mut H,item:&crate::mail::Item,events:Vec<egui::Event>) {
+    h.app.mail.reading=Some(item.clone());h.ctx.set_embed_viewports(true);h.t+=1.0/60.0;
+    let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(700.0,620.0))),time:Some(h.t),events,focused:true,..Default::default()},|ctx|h.app.mail_reader_ui(ctx));
+    h.shapes=out.shapes;
+}
+
+fn digest_visible_text(h:&H,label:&str)->(Rect,Rect) {
+    h.shapes.iter().find_map(|shape|match &shape.shape {
+        egui::Shape::Text(text) if text.galley.text()==label && text.opacity_factor>0.9=>Some((text.visual_bounding_rect(),shape.clip_rect)),
+        _=>None,
+    }).unwrap_or_else(||panic!("邮件详情缺少文字：{label}"))
+}
+
+#[test]
+fn mail_digest_ready_keeps_original_body_visible_in_both_details() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();let item=digest_test_mail();
+    let summary="请确认本周评审安排并在周五前反馈需要调整的事项".repeat(3).chars().take(60).collect::<String>();
+    let label=format!("AI 摘要：{summary}");
+    h.app.mail.digests.set_enabled(true);
+    h.app.mail.digests.insert_for_test(&item,crate::mail_digest::Digest::Ready(summary));
+    digest_open_island(&mut h,&item);
+    for reader in [false,true] {
+        if reader {digest_reader_frame(&mut h,&item);digest_reader_frame(&mut h,&item);}
+        let (digest,clip)=digest_visible_text(&h,&label);
+        let (body,body_clip)=digest_visible_text(&h,item.summary.as_ref());
+        assert!(clip.expand(1.0).contains_rect(digest),"摘要必须完整留在正文滚动区：{digest:?} / {clip:?}");
+        assert!(body_clip.expand(1.0).contains_rect(body),"短正文不能被摘要挤出滚动区：{body:?} / {body_clip:?}");
+        assert!(digest.bottom()<body.top(),"摘要应位于原始正文上方");
+        assert_eq!(clip,body_clip,"摘要和正文必须共用滚动区");
+        assert!(!h.app.mail.digests.worker_started_for_test(),"缓存命中不能启动后台请求");
+        assert_eq!(h.app.mail.digests.request_count_for_test(),0);
+    }
+}
+
+#[test]
+fn mail_digest_disabled_empty_and_raw_otp_never_start_from_either_detail() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for case in ["disabled","empty","hidden-otp","visible-otp"] {
+        let mut h=H::new();let mut item=digest_test_mail();
+        if case=="empty" {item.subject.clear();item.summary="".into();}
+        if case.ends_with("otp") {item.code=Some("123456".into());item.summary="验证码 123456，请勿转发。".into();}
+        if case=="visible-otp" {h.app.reveal_mail_code(&item);}
+        if case=="hidden-otp" {assert!(h.app.display_mail(&item).code.is_none(),"此回归必须覆盖显示层已清除code的邮件");}
+        h.app.mail.digests.set_enabled(case!="disabled");
+        digest_open_island(&mut h,&item);
+        for reader in [false,true] {
+            if reader {digest_reader_frame(&mut h,&item);digest_reader_frame(&mut h,&item);}
+            assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(text) if text.galley.text().starts_with("AI 摘要"))),"{case} 不能显示摘要区");
+            assert!(!h.app.mail.digests.worker_started_for_test(),"{case} 不能启动摘要worker");
+            assert_eq!(h.app.mail.digests.request_count_for_test(),0,"{case} 不能排队邮件内容");
+        }
+    }
+}
+
+#[test]
+fn mail_digest_pending_and_failed_render_without_automatic_retry() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for state in [crate::mail_digest::Digest::Pending,crate::mail_digest::Digest::Failed("无法连接大模型服务".into())] {
+        let label=if matches!(state,crate::mail_digest::Digest::Pending){"AI 摘要生成中…"}else{"AI 摘要失败，点击重试"};
+        let mut h=H::new();let item=digest_test_mail();h.app.mail.digests.set_enabled(true);
+        h.app.mail.digests.insert_for_test(&item,state);
+        digest_open_island(&mut h,&item);
+        for reader in [false,true] {
+            if reader {for _ in 0..5{digest_reader_frame(&mut h,&item);}}
+            let (rect,clip)=digest_visible_text(&h,label);assert!(clip.expand(1.0).contains_rect(rect));
+            digest_visible_text(&h,item.summary.as_ref());
+            assert_eq!(h.app.mail.digests.request_count_for_test(),0,"渲染Pending/Failed不能隐式重试");
+            assert!(!h.app.mail.digests.worker_started_for_test());
+        }
+    }
+}
+
+#[test]
+#[ignore="自动化UI与真实本机模型联通验收；需DAOZAI_LLM_URL和DAOZAI_LLM_MODEL，只允许回环地址"]
+fn mail_digest_live_ui_acceptance() {
+    use crate::mail_digest::Digest;
+    use std::time::{Duration,Instant};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let base_url=std::env::var("DAOZAI_LLM_URL").expect("请指定本机模型DAOZAI_LLM_URL");
+    let model=std::env::var("DAOZAI_LLM_MODEL").expect("请指定DAOZAI_LLM_MODEL");
+    let endpoint=url::Url::parse(&base_url).expect("本机模型URL无效");
+    assert!(endpoint.host().is_some_and(|host|match host {
+        url::Host::Domain(name)=>name.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip)=>ip.is_loopback(),url::Host::Ipv6(ip)=>ip.is_loopback(),
+    }),"本验收只允许本机回环地址，不能使用内网或外部模型额度");
+    let mut h=H::new();
+    let mut config=crate::llm::Config{enabled:true,mail_digest:true,base_url,model,effort:crate::llm::Effort::Unset,timeout_secs:120};
+    config.save().unwrap();
+    let healthy=config.clone();
+    let mut item=digest_test_mail();item.summary="请于周五前确认评审安排。".into();
+    h.app.mail.digests=crate::mail_digest::Digests::for_live_ui_test();
+    // 先在关闭状态展开，随后由真实详情帧触发请求，稳定观察Pending。
+    digest_open_island(&mut h,&item);
+    h.app.mail.digests.set_enabled(true);h.frame(vec![]);
+    assert!(matches!(h.app.mail.digests.get(&item),Some(Digest::Pending)));
+    digest_visible_text(&h,"AI 摘要生成中…");
+    digest_reader_frame(&mut h,&item);digest_reader_frame(&mut h,&item);
+    digest_visible_text(&h,"AI 摘要生成中…");
+
+    fn wait_for(h:&mut H,item:&crate::mail::Item,ready:bool)->String {
+        let deadline=Instant::now()+Duration::from_secs(130);
+        loop {
+            h.frame(vec![]);
+            match h.app.mail.digests.get(item).cloned() {
+                Some(Digest::Ready(text)) if ready=>return text,
+                Some(Digest::Failed(error)) if !ready=>return error,
+                Some(Digest::Failed(error))=>panic!("本机模型摘要未成功：{error}"),
+                Some(Digest::Ready(_))=>panic!("不可达端口不应生成摘要"),
+                _=>{},
+            }
+            assert!(Instant::now()<deadline,"本机模型摘要等待超时");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    fn assert_both_details(h:&mut H,item:&crate::mail::Item,text:&str) {
+        let label=format!("AI 摘要：{text}");
+        h.frame(vec![]);digest_visible_text(h,&label);digest_visible_text(h,item.summary.as_ref());
+        digest_reader_frame(h,item);digest_reader_frame(h,item);
+        let (rect,clip)=digest_visible_text(h,&label);assert!(clip.expand(1.0).contains_rect(rect));
+        digest_visible_text(h,item.summary.as_ref());
+    }
+    let summary=wait_for(&mut h,&item,true);
+    assert_both_details(&mut h,&item,&summary);
+    assert_eq!(h.app.mail.digests.request_count_for_test(),1);
+    h.app.mail.open_uid=None;h.app.mail.reading=None;h.frame(vec![]);
+    digest_open_island(&mut h,&item);assert_both_details(&mut h,&item,&summary);
+    assert_eq!(h.app.mail.digests.request_count_for_test(),1,"重新打开详情必须命中缓存");
+    println!("PASS pending_to_ready_both_details; cached_reopen_requests=1; synthetic_summary={summary}");
+
+    for master_disabled in [false,true] {
+        config=healthy.clone();config.enabled=!master_disabled;config.mail_digest=master_disabled;config.save().unwrap();
+        h.app.mail.digests.set_enabled(config.enabled&&config.mail_digest);
+        h.frame(vec![]);
+        for reader in [false,true] {
+            if reader {digest_reader_frame(&mut h,&item);digest_reader_frame(&mut h,&item);}
+            assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(text) if text.galley.text().starts_with("AI 摘要"))));
+            assert_eq!(h.app.mail.digests.request_count_for_test(),1,"任一开关关闭后都不能请求");
+        }
+    }
+    println!("PASS either_switch_off_no_digest_no_request");
+
+    for (index,reader) in [false,true].into_iter().enumerate() {
+        let reservation=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unavailable=reservation.local_addr().unwrap();drop(reservation);
+        config=healthy.clone();config.base_url=format!("http://{unavailable}/v1");config.timeout_secs=10;config.save().unwrap();
+        h.app.mail.digests.set_enabled(true);h.app.mail.reading=None;
+        let mut retry_item=item.clone();retry_item.uid+=index as u32+1;
+        let before=h.app.mail.digests.request_count_for_test();
+        digest_open_island(&mut h,&retry_item);
+        let _safe_error=wait_for(&mut h,&retry_item,false);
+        h.frame(vec![]);digest_visible_text(&h,"AI 摘要失败，点击重试");
+        digest_reader_frame(&mut h,&retry_item);digest_reader_frame(&mut h,&retry_item);
+        digest_visible_text(&h,"AI 摘要失败，点击重试");
+        assert_eq!(h.app.mail.digests.request_count_for_test(),before+1,"失败不能自动重试");
+        healthy.save().unwrap();
+        if reader {
+            let (rect,_)=digest_visible_text(&h,"AI 摘要失败，点击重试");let pos=rect.center();
+            for pressed in [true,false] {
+                digest_reader_frame_with_events(&mut h,&retry_item,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);
+            }
+        }else{
+            h.frame(vec![]);h.click_text("AI 摘要失败，点击重试");
+        }
+        assert_eq!(h.app.mail.digests.request_count_for_test(),before+2,"点击失败文字应仅重试一次");
+        let restored=wait_for(&mut h,&retry_item,true);assert_both_details(&mut h,&retry_item,&restored);
+        println!("PASS unreachable_then_click_retry_{}; synthetic_summary={restored}",if reader{"reader"}else{"island"});
+    }
+    println!("PASS automated_ui_local_model_acceptance; total_enqueued_requests={}",h.app.mail.digests.request_count_for_test());
 }

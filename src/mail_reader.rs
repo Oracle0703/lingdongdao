@@ -39,6 +39,17 @@ impl App {
                 ui.label(egui::RichText::new("鼠标滚轮或拖动右侧滚动条查看全文").size(11.5).color(Color32::from_gray(160)));
                 ui.style_mut().spacing.scroll.floating=false;
                 egui::ScrollArea::vertical().id_salt(("mail-reader-body",&item.account,item.uid)).auto_shrink([false,false]).show(ui,|ui|{
+                    if crate::mail_digest::eligible(&raw) {
+                        self.mail.digests.request(&raw,ui.ctx());
+                        match self.mail.digests.get(&raw).cloned() {
+                            Some(crate::mail_digest::Digest::Pending)=>{ui.label(egui::RichText::new("AI 摘要生成中…").size(14.0).color(Color32::from_gray(160)));},
+                            Some(crate::mail_digest::Digest::Ready(text))=>{ui.add(egui::Label::new(egui::RichText::new(format!("AI 摘要：{text}")).size(14.0).color(crate::theme::BLUE)).wrap()).on_hover_text("由自建大模型生成，仅供参考");},
+                            Some(crate::mail_digest::Digest::Failed(error))=>{
+                                if ui.add(egui::Link::new(egui::RichText::new("AI 摘要失败，点击重试").size(14.0).color(Color32::from_gray(160)))).on_hover_text(error).clicked(){self.mail.digests.retry(&raw,ui.ctx());}
+                            },
+                            None=>{},
+                        }
+                    }
                     ui.add(egui::Label::new(egui::RichText::new(if item.summary.is_empty(){"（这封邮件没有正文）"}else{item.summary.as_ref()}).size(14.0).color(Color32::from_gray(235))).selectable(true).wrap());
                     if !item.links.is_empty(){
                         ui.add_space(12.0);ui.separator();ui.label(egui::RichText::new("邮件中的链接").strong());
