@@ -34,6 +34,7 @@ fn cover_colors(title: &str) -> (Color32, Color32) {
 impl App {
     // ================= 音乐 =================
     pub(crate) fn page_music(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
+        if self.music_sources_open {self.music_source_list(c);return;}
         let np=self.media.clone();
         let has=!np.title.is_empty();
         let with_lyrics=has && self.show_lyrics;
@@ -56,8 +57,17 @@ impl App {
             paint::note(c,75.0,44.0,26.0,Color32::from_rgb(110,110,114));
         }
 
+        let source_label=if self.settings.music_source.is_empty(){
+            if np.source.is_empty(){"自动选择".into()}else{format!("自动 · {}",crate::smtc::source_name(&np.source))}
+        }else{crate::smtc::source_name(&self.settings.music_source)};
+        let source_short=if self.settings.music_source.is_empty(){"自动"}else{&source_label};
+        let (source_button,source_card)=capsule(c,91.0,108.0,53.0,20.0,"m-source",Color32::from_gray(22),Color32::from_gray(47));
+        source_card.text(117.5,122.0,&c.fit(source_short,10.0,W::Regular,43.0),10.0,W::Regular,if source_button.hovered(){theme::WHITE}else{theme::GRAY},H::Center);
+        if source_button.on_hover_text(format!("音乐来源：{source_label}\n选择音乐来源")).clicked(){self.music_sources_open=true;ctx.request_repaint();}
+
         if !has {
-            c.text(121.0,47.0,"暂无音乐",14.0,W::Bold,theme::WHITE,H::Left);
+            let waiting=if self.settings.music_source.is_empty(){"暂无音乐".into()}else{format!("等待 {}",crate::smtc::source_name(&self.settings.music_source))};
+            c.text(121.0,47.0,&c.fit(&waiting,14.0,W::Bold,252.0),14.0,W::Bold,theme::WHITE,H::Left);
         } else {
             let text_x=if with_lyrics {99.0}else{121.0};
             let text_width=if with_lyrics {123.0}else{220.0};
@@ -137,6 +147,48 @@ impl App {
                 self.persist_settings(previous);
             }
         }
+    }
+
+    pub(crate) fn music_source_choices(&self)->Vec<(String,String,&'static str)> {
+        let mut choices=vec![(String::new(),"自动选择".into(),"跟随播放")];
+        for source in &self.music_sources {
+            if source.id.is_empty() || choices.iter().any(|(id,_,_)|!id.is_empty()&&crate::smtc::source_matches(id,&source.id)){continue;}
+            let name=if source.name.trim().is_empty(){crate::smtc::source_name(&source.id)}else{source.name.clone()};
+            choices.push((source.id.clone(),name,if source.playing{"正在播放"}else{"已暂停"}));
+        }
+        let preferred=&self.settings.music_source;
+        if !preferred.is_empty() && !choices.iter().any(|(id,_,_)|!id.is_empty()&&crate::smtc::source_matches(preferred,id)) {
+            choices.push((preferred.clone(),crate::smtc::source_name(preferred),"暂无媒体"));
+        }
+        choices
+    }
+
+    fn music_source_list(&mut self,c:&Card) {
+        c.text(44.0,25.0,"音乐来源",12.0,W::Semibold,theme::WHITE,H::Left);
+        let back=c.hit(327.0,7.0,52.0,22.0,"m-source-back");
+        c.text(353.0,23.0,"返回",10.5,W::Regular,if back.hovered(){theme::WHITE}else{theme::GRAY},H::Center);
+        if back.clicked(){self.music_sources_open=false;c.ui.ctx().request_repaint();return;}
+        let rect=c.rect(44.0,34.0,335.0,95.0);
+        let mut list=egui::Ui::new(c.ui.ctx().clone(),egui::Id::new(("music-sources",c.live)),
+            egui::UiBuilder::new().max_rect(rect).layer_id(c.painter.layer_id()).style(c.ui.style().clone()));
+        list.set_clip_rect(rect.intersect(c.painter.clip_rect()));list.set_opacity(c.painter.opacity());
+        if !c.live{list.disable();}
+        list.spacing_mut().item_spacing.y=3.0*c.s;
+        list.style_mut().spacing.scroll.floating=false;list.spacing_mut().scroll.bar_width=4.0*c.s;
+        let mut chosen=None;
+        egui::ScrollArea::vertical().id_salt("music-source-list").max_height(95.0*c.s).auto_shrink([false,false]).show(&mut list,|ui|{
+            for (id,name,status) in self.music_source_choices() {
+                let selected=if id.is_empty(){self.settings.music_source.is_empty()}else{!self.settings.music_source.is_empty()&&crate::smtc::source_matches(&self.settings.music_source,&id)};
+                let (rect,response)=ui.allocate_exact_size(egui::vec2(ui.available_width(),26.0*c.s),egui::Sense::click());
+                if selected||response.hovered(){ui.painter().rect_filled(rect,6.0*c.s,if selected{Color32::from_rgb(28,55,80)}else{theme::BTN});}
+                if selected{ui.painter().circle_filled(egui::pos2(rect.left()+9.0*c.s,rect.center().y),2.5*c.s,theme::BLUE);}
+                let name=c.fit(&name,11.5,W::Regular,(rect.width()/c.s-108.0).max(30.0));
+                ui.painter().text(egui::pos2(rect.left()+19.0*c.s,rect.center().y),egui::Align2::LEFT_CENTER,name,c.font(11.5,W::Regular),theme::WHITE);
+                ui.painter().text(egui::pos2(rect.right()-7.0*c.s,rect.center().y),egui::Align2::RIGHT_CENTER,status,c.font(10.0,W::Regular),theme::GRAY);
+                if response.clicked(){chosen=Some(id);}
+            }
+        });
+        if let Some(id)=chosen {if self.set_music_source(&id){self.music_sources_open=false;c.ui.ctx().request_repaint();}}
     }
 
     fn draw_music_lyrics(&mut self,c:&Card) {

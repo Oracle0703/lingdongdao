@@ -92,6 +92,7 @@ pub struct Env {
     /// 前台浏览器的顶部是否与岛重叠；岛仔自身窗口或暂不可读时为 None。
     pub browser_at_top: Option<bool>,
     pub media: NowPlaying,
+    pub media_sources: Vec<crate::smtc::Source>,
     /// 系统主音量（0..100, 是否静音）；v0.5.4 音量条与系统双向同步。
     pub volume: Option<(u32, bool)>,
     /// 已连接的蓝牙音频设备（名称 + 可选电量）。
@@ -369,6 +370,8 @@ pub struct App {
     island_lyric_layout: Option<std::sync::Arc<egui::Galley>>,
     media_anchor: (String, f64, f64, bool),
     pub(crate) media: NowPlaying,
+    pub(crate) music_sources: Vec<crate::smtc::Source>,
+    pub(crate) music_sources_open: bool,
     pub(crate) music_artwork: Option<(std::sync::Arc<egui::ColorImage>,egui::TextureHandle)>,
 
     forced_open_until:f64,
@@ -500,6 +503,8 @@ impl App {
             island_lyric_layout: None,
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
+            music_sources: Vec::new(),
+            music_sources_open: false,
             music_artwork: None,
             forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
@@ -1294,7 +1299,9 @@ impl App {
                 let mail_body=self.page==5 && self.mail.open_uid.is_some()
                     && Rect::from_min_max(Pos2::new(46.0,104.0),Pos2::new(374.0,194.0)).contains(cursor);
                 let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
-                if mail_body || mail_list {self.wheel_delta=0.0;}
+                let music_sources=self.page==0 && self.music_sources_open
+                    && Rect::from_min_max(Pos2::new(44.0,34.0),Pos2::new(379.0,129.0)).contains(cursor);
+                if mail_body || mail_list || music_sources {self.wheel_delta=0.0;}
                 else {
                     // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
                     if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
@@ -1606,7 +1613,8 @@ impl App {
             }
         }
         if lyric_alpha>=0.997 {return;}
-        let header=base.faded(1.0-lyric_alpha);
+        let source_menu_alpha=if self.page==0 && self.music_sources_open {1.0-smoothstep(0.2,0.65,p)}else{1.0};
+        let header=base.faded((1.0-lyric_alpha)*source_menu_alpha);
         let base=&header;
         let m = anim::ease_in_out(smoothstep(0.0, 0.85, p));
         let clock = self.settings.clock_text(&env.clock);
@@ -1917,10 +1925,32 @@ impl App {
         }
     }
 
+    pub(crate) fn set_music_source(&mut self,source:&str)->bool {
+        let source=source.trim();
+        if source.chars().any(char::is_control){return false;}
+        if self.settings.music_source.eq_ignore_ascii_case(source){return true;}
+        let previous=self.settings.clone();
+        self.settings.music_source=source.to_owned();
+        if !self.persist_settings(previous){return false;}
+        self.media=NowPlaying::default();
+        self.media_anchor=(String::new(),0.0,0.0,false);
+        self.music_artwork=None;
+        self.ly=LyricsState::default();
+        true
+    }
+
+    /// 命令绑定用户正在看到的来源，不能在后台刷新后改为控制另一播放器。
+    pub fn media_control_source(&self)->Option<&str> {
+        (!self.media.source.is_empty() && self.media.is_music()
+            && crate::smtc::source_matches(&self.settings.music_source,&self.media.source))
+            .then_some(self.media.source.as_str())
+    }
+
     /// 媒体进度在两次 SMTC 刷新之间按时间外推，进度条才会连续走动。
     fn update_media(&mut self, env: &Env, ctx: &egui::Context) {
+        self.music_sources=env.media_sources.clone();
         let m = &env.media;
-        if !m.is_music() {
+        if !m.is_music() || !crate::smtc::source_matches(&self.settings.music_source,&m.source) {
             self.media=NowPlaying::default();
             self.media_anchor=(String::new(),0.0,0.0,false);
             self.music_artwork=None;
@@ -1928,7 +1958,7 @@ impl App {
             return;
         }
         let a = &self.media_anchor;
-        if a.0 != m.title || (a.1 - m.position).abs() > 0.01 || a.3 != m.playing {
+        if self.media.source!=m.source || self.media.song_id!=m.song_id || a.0 != m.title || (a.1 - m.position).abs() > 0.01 || a.3 != m.playing {
             self.media_anchor = (m.title.clone(), m.position, env.t, m.playing);
         }
         let mut np = m.clone();

@@ -20,6 +20,60 @@ mod player_seek;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Source {
+    pub id: String,
+    pub name: String,
+    pub playing: bool,
+}
+
+#[derive(Default)]
+pub struct SourceState {
+    pub preferred: String,
+    pub available: Vec<Source>,
+}
+
+pub type Sources = Arc<Mutex<SourceState>>;
+
+fn source_key(id: &str) -> String {
+    let id = id.trim().to_ascii_lowercase();
+    match id.as_str() {
+        "qqmusic" | "qqmusic.exe" => "qqmusic",
+        "cloudmusic" | "cloudmusic.exe" => "cloudmusic",
+        "汽水音乐" | "sodamusic" | "sodamusic.exe" => "sodamusic",
+        "kugou" | "kugou.exe" => "kugou",
+        "spotify" | "spotify.exe" => "spotify",
+        "kwmusic" | "kwmusic.exe" => "kwmusic",
+        "chrome" | "chrome.exe" => "chrome",
+        "msedge" | "msedge.exe" => "msedge",
+        "firefox" | "firefox.exe" => "firefox",
+        "brave" | "brave.exe" => "brave",
+        "opera" | "opera.exe" => "opera",
+        _ => return id,
+    }.into()
+}
+
+pub fn source_matches(preferred: &str, actual: &str) -> bool {
+    preferred.is_empty() || source_key(preferred) == source_key(actual)
+}
+
+pub fn source_name(id: &str) -> String {
+    match source_key(id).as_str() {
+        "qqmusic" => "QQ 音乐",
+        "cloudmusic" => "网易云音乐",
+        "sodamusic" => "汽水音乐",
+        "kugou" => "酷狗音乐",
+        "spotify" => "Spotify",
+        "kwmusic" => "酷我音乐",
+        "chrome" => "Chrome",
+        "msedge" => "Edge",
+        "firefox" => "Firefox",
+        "brave" => "Brave",
+        "opera" => "Opera",
+        _ => return id.to_owned(),
+    }.into()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MediaKind {
     Music,
@@ -221,13 +275,45 @@ fn choose_media_for_source(system:Option<NowPlaying>,native:Option<NowPlaying>,p
     choose_media(system,native)
 }
 
-#[cfg(windows)]
+fn add_available(sources: &mut Vec<Source>, media: &NowPlaying) {
+    if media.source.is_empty() || !media.is_music() {return;}
+    if let Some(source) = sources.iter_mut().find(|source|source_matches(&source.id,&media.source)) {
+        source.playing |= media.playing;
+    } else {
+        sources.push(Source {id:media.source.clone(),name:source_name(&media.source),playing:media.playing});
+    }
+}
+
+fn choose_preferred(system: Option<NowPlaying>, native: Option<NowPlaying>, previous: &str, native_pending: bool, preferred: &str) -> Option<NowPlaying> {
+    if preferred.is_empty() {return choose_media_for_source(system,native,previous,native_pending);}
+    let matches = |media: &NowPlaying|source_matches(preferred,&media.source) && media.is_music();
+    choose_media(system.filter(&matches),native.filter(&matches))
+}
+
+#[cfg(any(windows,test))]
+fn artwork_matches(source:&str,title:&str,artist:&str,selected:&NowPlaying)->bool {
+    !source.is_empty() && source_matches(source,&selected.source) && title==selected.title
+        && (artist==selected.artist || artist.is_empty() || selected.artist.is_empty())
+}
+
+#[cfg(all(windows,test))]
 fn query(artwork:&mut ArtworkCache) -> Option<NowPlaying> {
     let result=query_system(artwork);artwork.system_result(result,std::time::Instant::now())
 }
 
-#[cfg(windows)]
+#[cfg(all(windows,test))]
 fn query_system(artwork:&mut ArtworkCache) -> Result<Option<NowPlaying>,()> {
+    let (session,mut media)=query_system_metadata(artwork,"",&mut Vec::new())?;
+    if let Some(media)=&mut media {load_system_artwork(media,session,artwork);}
+    Ok(media)
+}
+
+#[cfg(windows)]
+type MediaSession=windows::Media::Control::GlobalSystemMediaTransportControlsSession;
+
+/// 这里只枚举元数据；封面必须等系统和原生来源完成最终选择后才请求。
+#[cfg(windows)]
+fn query_system_metadata(artwork:&mut ArtworkCache,preferred:&str,available:&mut Vec<Source>) -> Result<(Option<MediaSession>,Option<NowPlaying>),()> {
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
 
     if artwork.manager.is_none(){artwork.manager=media_result(GlobalSystemMediaTransportControlsSessionManager::RequestAsync().map_err(|_|())?);}
@@ -236,26 +322,38 @@ fn query_system(artwork:&mut ArtworkCache) -> Result<Option<NowPlaying>,()> {
     let mut sessions=current.iter().cloned().collect::<Vec<_>>();
     let all=mgr.GetSessions().map_err(|_|{artwork.manager=None;})?;
     for session in all{if !sessions.contains(&session){sessions.push(session);}}
-    if sessions.is_empty(){return Ok(None);}
+    if sessions.is_empty(){return Ok((None,None));}
     // 先比较全部会话；视频不能遮挡音乐，封面只为最终选中的会话读取。
     let previous=artwork.system.as_ref().map(|(media,_)|media.source.clone());
     let mut unreadable_previous=false;
-    let (session,mut media)=sessions.iter().filter_map(|session|{
+    let candidates:Vec<_>=sessions.iter().filter_map(|session|{
         let media=read_session(session,artwork);
         if media.is_none() && session.SourceAppUserModelId().ok().is_some_and(|id|previous.as_deref()==Some(id.to_string().as_str())){unreadable_previous=true;}
         media.map(|media|(session,media))
-    })
-        .min_by_key(|(_,media)|media_rank(media)).ok_or(())?;
+    }).collect();
+    for (_,media) in &candidates {add_available(available,media);}
+    let selected=candidates.iter().filter(|(_,media)|preferred.is_empty() || (source_matches(preferred,&media.source) && media.is_music()))
+        .min_by_key(|(_,media)|media_rank(media));
+    let Some((session,media))=selected else {
+        return if preferred.is_empty(){Err(())}else{Ok((None,None))};
+    };
     // 当前播放器正在重载时，不把暂停中的另一客户端当成用户切换了播放源。
-    if media_rank(&media)>0 && unreadable_previous{return Err(());}
+    if preferred.is_empty() && media_rank(media)>0 && unreadable_previous{return Err(());}
+    Ok((Some((*session).clone()),Some(media.clone())))
+}
+
+#[cfg(windows)]
+fn load_system_artwork(media:&mut NowPlaying,session:Option<MediaSession>,artwork:&mut ArtworkCache) {
     let key=format!("{}|{}|{}|{}",media.source,media.title,media.artist,media.album);
-    let session=session.clone();
+    let Some(session)=session else {
+        if artwork.key==key {media.artwork=artwork.image.clone();}
+        return;
+    };
     let title=media.title.clone();
     media.artwork=artwork.poll(key,move ||{
         let props=media_result(session.TryGetMediaPropertiesAsync().ok()?)?;
         if props.Title().ok()?.to_string()!=title{return None;}read_artwork(&props)
     });
-    Ok(Some(media))
 }
 
 #[cfg(windows)]
@@ -321,11 +419,6 @@ fn read_session(session:&windows::Media::Control::GlobalSystemMediaTransportCont
     if !has_position{sampled_at=None;}
     let playback_type=match playback_type.map(|kind|kind.0){Some(1)=>MediaKind::Music,Some(2)=>MediaKind::Video,_=>MediaKind::Unknown};
     Some(NowPlaying { title, artist, album, source, song_id:None, playing, position, sampled_at, event_time_ms, duration, artwork:None, playback_type })
-}
-
-#[cfg(not(windows))]
-fn query(_artwork:&mut ArtworkCache) -> Option<NowPlaying> {
-    None
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -558,52 +651,122 @@ impl MediaMemory {
     }
 }
 
-/// 后台线程：刷新正在播放，进度条在两次刷新之间由界面按时间外推。
+#[derive(Default)]
+struct PollCache {
+    preferred: String,
+    artwork: ArtworkCache,
+    playback_clock: PlaybackClock,
+    memory: MediaMemory,
+    selected_source: String,
+    #[cfg(windows)]
+    netease: netease_playback::Reader,
+}
+
+impl PollCache {
+    fn set_preferred(&mut self, preferred: &str) -> bool {
+        if self.preferred==preferred {return false;}
+        *self=Self {preferred:preferred.into(),..Default::default()};
+        true
+    }
+
+    fn clear(&mut self) {
+        *self=Self {preferred:self.preferred.clone(),..Default::default()};
+    }
+
+    fn select(&mut self,system:Option<NowPlaying>,native:Option<NowPlaying>,native_pending:bool)->NowPlaying {
+        let mut media=choose_preferred(system,native,&self.selected_source,native_pending,&self.preferred).unwrap_or_default();
+        if !self.preferred.is_empty() && media.title.is_empty() {
+            // 手动来源退出后立即留空，不能让自动模式的短暂记忆把旧歌曲填回来。
+            self.memory=MediaMemory::default();self.playback_clock=PlaybackClock::default();self.selected_source.clear();
+        } else {
+            self.memory.update(&mut media,std::time::Instant::now());
+            if !media.source.is_empty(){self.selected_source=media.source.clone();}
+        }
+        media
+    }
+}
+
+fn publish(state:&Shared,sources:&Sources,preferred:&str,media:NowPlaying,available:Vec<Source>)->Option<bool> {
+    // Sources 锁持有到共享媒体写入完成，防止检查与发布之间切换偏好。
+    let mut sources=sources.lock().unwrap_or_else(|error|error.into_inner());
+    if sources.preferred!=preferred{return None;}
+    let mut changed=sources.available!=available;
+    sources.available=available;
+    if let Ok(mut current)=state.lock() {
+        changed|=current.title!=media.title || current.artist!=media.artist || current.playing!=media.playing
+            || current.source!=media.source || current.song_id!=media.song_id || current.duration!=media.duration
+            || current.artwork.as_ref().zip(media.artwork.as_ref()).map_or(current.artwork.is_some()!=media.artwork.is_some(),|(old,new)|!Arc::ptr_eq(old,new));
+        *current=media;
+    }
+    Some(changed)
+}
+
+/// 保持旧 API：未提供偏好时继续自动选择来源。
 pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Arc<std::sync::atomic::AtomicBool> {
+    spawn_poller_with_sources(state,ctx,Arc::new(Mutex::new(SourceState::default())))
+}
+
+/// 后台线程：来源可手动锁定；仅最终选中的来源请求封面。
+pub fn spawn_poller_with_sources(state: Shared,ctx:eframe::egui::Context,sources:Sources)->Arc<std::sync::atomic::AtomicBool> {
     let enabled=Arc::new(std::sync::atomic::AtomicBool::new(true));
     let active=enabled.clone();
     std::thread::spawn(move || {
         let _apartment=init_winrt();
-        let mut artwork=ArtworkCache::default();
-        let mut playback_clock=PlaybackClock::default();
-        let mut memory=MediaMemory::default();
-        let mut selected_source=String::new();
-        #[cfg(windows)]
-        let mut netease=netease_playback::Reader::default();
+        let mut cache=PollCache::default();
         loop {
             if Arc::strong_count(&state)==1{break;}
+            let preferred=sources.lock().unwrap_or_else(|error|error.into_inner()).preferred.clone();
+            if cache.set_preferred(&preferred) {
+                let available=sources.lock().unwrap_or_else(|error|error.into_inner()).available.clone();
+                if publish(&state,&sources,&preferred,NowPlaying::default(),available)==Some(true){ctx.request_repaint();}
+            }
             if !active.load(std::sync::atomic::Ordering::Relaxed){
-                artwork=ArtworkCache::default();playback_clock=PlaybackClock::default();memory=MediaMemory::default();selected_source.clear();
-                #[cfg(windows)] {netease=netease_playback::Reader::default();}
-                if let Ok(mut current)=state.lock(){if !current.title.is_empty(){*current=NowPlaying::default();ctx.request_repaint();}}
+                cache.clear();
+                if publish(&state,&sources,&preferred,NowPlaying::default(),Vec::new())==Some(true){ctx.request_repaint();}
                 std::thread::sleep(Duration::from_millis(250));continue;
             }
-            let system=query(&mut artwork);
+            let mut available=Vec::new();
             #[cfg(windows)]
-            let native=netease.poll();
+            let (session,system)=match query_system_metadata(&mut cache.artwork,&preferred,&mut available) {
+                Ok((session,media))=>(session,cache.artwork.system_result(Ok(media),std::time::Instant::now())),
+                Err(())=>(None,cache.artwork.system_result(Err(()),std::time::Instant::now())),
+            };
+            #[cfg(not(windows))]
+            let system=None;
             #[cfg(windows)]
-            let native_pending=netease.pending();
+            let system_identity=system.as_ref().map(|media|(media.source.clone(),media.title.clone(),media.artist.clone()));
+            #[cfg(windows)]
+            let native=cache.netease.poll();
+            #[cfg(windows)]
+            let native_pending=cache.netease.pending();
             #[cfg(not(windows))]
             let native=None;
             #[cfg(not(windows))]
             let native_pending=false;
-            let mut np=choose_media_for_source(system,native,&selected_source,native_pending).unwrap_or_default();
-            memory.update(&mut np,std::time::Instant::now());
-            if !np.source.is_empty(){selected_source=np.source.clone();}
-            #[cfg(windows)]
-            netease.fill_artwork(&mut np);
-            playback_clock.update(&mut np);
-            if np.title.is_empty() {
-                #[cfg(windows)] let manager=artwork.manager.take();
-                artwork=ArtworkCache::default();
-                #[cfg(windows)] {artwork.manager=manager;}
+            if let Some(native)=&native {add_available(&mut available,native);}
+            if native_pending && !available.iter().any(|source|source_matches(&source.id,"cloudmusic.exe")) {
+                available.push(Source{id:"cloudmusic.exe".into(),name:source_name("cloudmusic.exe"),playing:false});
             }
-            if let Ok(mut cur) = state.lock() {
-                let changed=cur.title!=np.title || cur.artist!=np.artist || cur.playing!=np.playing
-                    || cur.source!=np.source || cur.song_id!=np.song_id || cur.duration!=np.duration
-                    || cur.artwork.as_ref().zip(np.artwork.as_ref()).map_or(cur.artwork.is_some()!=np.artwork.is_some(),|(old,new)|!Arc::ptr_eq(old,new));
-                *cur = np;
-                if changed{ctx.request_repaint();}
+            available.sort_by_key(|source|source_key(&source.id));
+            // WinRT 和本机元数据读取可能较慢，过期的一轮不能再启动封面请求。
+            if sources.lock().unwrap_or_else(|error|error.into_inner()).preferred!=preferred {continue;}
+            let mut np=cache.select(system,native,native_pending);
+            #[cfg(windows)]
+            if system_identity.as_ref().is_some_and(|(source,title,artist)|artwork_matches(source,title,artist,&np)) {
+                load_system_artwork(&mut np,session,&mut cache.artwork);
+            }
+            #[cfg(windows)]
+            cache.netease.fill_artwork(&mut np);
+            cache.playback_clock.update(&mut np);
+            if np.title.is_empty() {
+                #[cfg(windows)] let manager=cache.artwork.manager.take();
+                cache.artwork=ArtworkCache::default();
+                #[cfg(windows)] {cache.artwork.manager=manager;}
+            }
+            match publish(&state,&sources,&preferred,np,available) {
+                Some(true)=>ctx.request_repaint(),
+                None=>continue,
+                Some(false)=>{},
             }
             std::thread::sleep(Duration::from_millis(250));
         }
@@ -614,6 +777,90 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Arc<std::sync::ato
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source_media(source:&str,playing:bool)->NowPlaying {
+        NowPlaying{source:source.into(),title:"合成歌曲".into(),artist:"合成歌手".into(),duration:120.0,playing,playback_type:MediaKind::Music,..Default::default()}
+    }
+
+    #[test]
+    fn manual_source_keeps_paused_selection_and_auto_keeps_original_priority() {
+        let qq=source_media("QQMusic.exe",false);let netease=source_media("cloudmusic.exe",true);
+        assert_eq!(choose_preferred(Some(qq.clone()),Some(netease.clone()),"",false,"").unwrap().source,"cloudmusic.exe");
+        let selected=choose_preferred(Some(qq.clone()),Some(netease.clone()),"cloudmusic.exe",false,"qqmusic").unwrap();
+        assert_eq!(selected.source,"QQMusic.exe");assert!(!selected.playing);
+        assert_eq!(choose_preferred(Some(qq),Some(netease),"",false,"CLOUDMUSIC.EXE").unwrap().source,"cloudmusic.exe");
+    }
+
+    #[test]
+    fn manual_source_missing_or_exited_stays_empty_without_memory_fallback() {
+        let qq=source_media("QQMusic.exe",false);let netease=source_media("cloudmusic.exe",true);
+        let mut cache=PollCache::default();cache.set_preferred("QQMusic.exe");
+        assert_eq!(cache.select(Some(qq),Some(netease.clone()),false).source,"QQMusic.exe");
+        assert!(cache.memory.last.is_some());
+        let absent=cache.select(None,Some(netease),true);
+        assert!(absent.title.is_empty());assert!(cache.memory.last.is_none());assert!(cache.selected_source.is_empty());
+        assert!(choose_preferred(None,None,"QQMusic.exe",false,"QQMusic.exe").is_none());
+    }
+
+    #[test]
+    fn dynamic_sources_deduplicate_aliases_and_preserve_unknown_ids() {
+        let mut available=Vec::new();
+        add_available(&mut available,&source_media("QQMusic.exe",false));
+        add_available(&mut available,&source_media("qqmusic",true));
+        add_available(&mut available,&source_media("Custom.Player_123!App",false));
+        add_available(&mut available,&source_media("custom.player_123!app",false));
+        assert_eq!(available.len(),2);assert!(available[0].playing);assert_eq!(available[0].name,"QQ 音乐");
+        assert_eq!(available[1].id,"Custom.Player_123!App");assert_eq!(available[1].name,available[1].id);
+        assert!(source_matches("","any source"));assert!(!source_matches("QQMusic.exe","cloudmusic.exe"));
+        let dynamic=source_media("Custom.Player_123!App",false);
+        assert_eq!(choose_preferred(Some(dynamic),Some(source_media("cloudmusic.exe",true)),"",false,"CUSTOM.PLAYER_123!APP").unwrap().source,"Custom.Player_123!App");
+        for (id,name) in [("cloudmusic.exe","网易云音乐"),("SodaMusic.exe","汽水音乐"),("KuGou.exe","酷狗音乐"),("Spotify.exe","Spotify"),("KwMusic.exe","酷我音乐"),("msedge.exe","Edge")] {
+            assert_eq!(source_name(id),name);
+        }
+    }
+
+    #[test]
+    fn switching_preference_discards_all_old_media_caches() {
+        let old=source_media("cloudmusic.exe",true);let mut cache=PollCache::default();
+        cache.set_preferred("cloudmusic.exe");
+        cache.artwork.key="old-cover".into();cache.artwork.bytes=vec![1,2,3];cache.artwork.pending=true;
+        cache.artwork.image=Some(Arc::new(eframe::egui::ColorImage::new([2,2],eframe::egui::Color32::RED)));
+        #[cfg(windows)] {cache.artwork.system=Some((old.clone(),std::time::Instant::now()));}
+        cache.memory.last=Some((old.clone(),std::time::Instant::now()));cache.playback_clock.previous=Some(old);
+        cache.selected_source="cloudmusic.exe".into();
+        assert!(!cache.set_preferred("cloudmusic.exe"));assert!(cache.memory.last.is_some());
+        assert!(cache.set_preferred("QQMusic.exe"));
+        assert!(cache.artwork.key.is_empty() && cache.artwork.bytes.is_empty() && cache.artwork.image.is_none() && !cache.artwork.pending);
+        assert!(cache.memory.last.is_none() && cache.playback_clock.previous.is_none() && cache.selected_source.is_empty());
+        #[cfg(windows)] {assert!(cache.artwork.system.is_none());assert!(!cache.netease.pending());}
+        assert!(cache.select(None,None,false).title.is_empty());
+    }
+
+    #[test]
+    fn stale_reads_cannot_publish_after_preference_changes_and_source_changes_repaint() {
+        let state=shared();let sources=Arc::new(Mutex::new(SourceState{preferred:"QQMusic.exe".into(),available:Vec::new()}));
+        let old=source_media("cloudmusic.exe",true);
+        assert_eq!(publish(&state,&sources,"",old,vec![]),None);assert!(state.lock().unwrap().title.is_empty());
+        let available=vec![Source{id:"QQMusic.exe".into(),name:"QQ 音乐".into(),playing:false}];
+        assert_eq!(publish(&state,&sources,"QQMusic.exe",NowPlaying::default(),available.clone()),Some(true));
+        assert_eq!(publish(&state,&sources,"QQMusic.exe",NowPlaying::default(),available),Some(false));
+        sources.lock().unwrap().preferred="Custom.Player!App".into();
+        assert_eq!(publish(&state,&sources,"QQMusic.exe",source_media("QQMusic.exe",false),vec![]),None);
+        assert!(state.lock().unwrap().title.is_empty());assert_eq!(sources.lock().unwrap().available.len(),1);
+    }
+
+    #[test]
+    fn cover_request_identity_only_accepts_the_final_selected_source() {
+        let qq=source_media("QQMusic.exe",false);let netease=source_media("cloudmusic.exe",true);
+        let selected=choose_preferred(Some(qq.clone()),Some(netease.clone()),"",false,"").unwrap();
+        assert!(!artwork_matches(&qq.source,&qq.title,&qq.artist,&selected));
+        assert!(artwork_matches(&netease.source,&netease.title,&netease.artist,&selected));
+        assert!(!artwork_matches("",&netease.title,&netease.artist,&selected));
+        assert!(!artwork_matches(&netease.source,"旧歌",&netease.artist,&selected));
+        let selected=choose_preferred(Some(qq.clone()),Some(netease.clone()),"",false,"QQMusic.exe").unwrap();
+        assert!(artwork_matches(&qq.source,&qq.title,&qq.artist,&selected));
+        assert!(!artwork_matches(&netease.source,&netease.title,&netease.artist,&selected));
+    }
 
     #[test]
     fn newer_native_event_preserves_matching_system_metadata(){

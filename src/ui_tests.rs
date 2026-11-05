@@ -21,6 +21,7 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     assert!(upgraded.display_id.is_empty() && upgraded.avoid_apps.is_empty());
     assert!(upgraded.avoid_browsers && upgraded.bluetooth_notifications);
     assert!(!upgraded.clock_12h && !upgraded.notification_preview);
+    assert!(upgraded.music_source.is_empty(),"旧配置必须继续自动选择音乐来源");
     assert_eq!(upgraded.clock_period,0);assert_eq!(upgraded.mail_code_hide_seconds,60);
     for _ in 0..2 {
         crate::model::Settings::load().save().unwrap();
@@ -306,6 +307,7 @@ struct H {
     shapes:Vec<egui::epaint::ClippedShape>,
     bt: Vec<crate::bt::Device>,
     media: crate::smtc::NowPlaying,
+    media_sources: Vec<crate::smtc::Source>,
     power: (Option<u8>, bool),
     network: Option<bool>,
     system_idle: Option<f64>,
@@ -322,7 +324,7 @@ impl H {
         std::env::set_var("DAOZAI_DATA_DIR", &dir);
         let ctx = egui::Context::default();
         let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
-        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
+        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),media_sources:vec![],power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
         self.t += 1.0 / 60.0;
@@ -344,6 +346,7 @@ impl H {
             bt: self.bt.clone(),
             bt_ready: true,
             media:self.media.clone(),
+            media_sources:self.media_sources.clone(),
             battery:self.power.0,
             charging:self.power.1,
             network:self.network,
@@ -4534,4 +4537,118 @@ fn mail_digest_live_ui_acceptance() {
         println!("PASS unreachable_then_click_retry_{}; synthetic_summary={restored}",if reader{"reader"}else{"island"});
     }
     println!("PASS automated_ui_local_model_acceptance; total_enqueued_requests={}",h.app.mail.digests.request_count_for_test());
+}
+
+fn music_source_fixture()->H {
+    let mut h=H::new();
+    h.media_sources=vec![
+        crate::smtc::Source{id:"QQMusic.exe".into(),name:crate::smtc::source_name("QQMusic.exe"),playing:true},
+        crate::smtc::Source{id:"cloudmusic.exe".into(),name:crate::smtc::source_name("cloudmusic.exe"),playing:false},
+    ];
+    h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"QQ 曲目".into(),artist:"歌手".into(),duration:120.0,playing:true,playback_type:crate::smtc::MediaKind::Music,..Default::default()};
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover(H::local(300.0,60.0),0.3);
+    h
+}
+
+fn open_music_source_list(h:&mut H) {
+    h.click(H::local(117.5,118.0));h.frame(vec![]);
+    assert!(h.app.music_sources_open,"来源入口必须打开岛内列表");
+    for text in ["音乐来源","返回"] {
+        let (rect,clip)=digest_visible_text(h,text);
+        assert!(h.hit.contains(rect.center())&&clip.expand(1.0).contains_rect(rect),"来源选择不能超出原生岛体：{text}");
+    }
+}
+
+#[test]
+fn music_source_clicks_switch_qq_netease_and_auto_with_persistence() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=music_source_fixture();
+    assert!(h.app.settings.music_source.is_empty());
+    for (id,label) in [("cloudmusic.exe",crate::smtc::source_name("cloudmusic.exe")),("QQMusic.exe",crate::smtc::source_name("QQMusic.exe")),("",String::from("自动选择"))] {
+        open_music_source_list(&mut h);h.click_text(&label);h.frame(vec![]);
+        assert!(!h.app.music_sources_open,"选择成功应返回音乐页");
+        assert_eq!(h.app.settings.music_source,id);assert_eq!(crate::model::Settings::load().music_source,id);
+        let actual=if id.is_empty(){"cloudmusic.exe"}else{id};
+        h.media.source=actual.into();h.media.title=format!("{label}曲目");h.frame(vec![]);
+        assert_eq!(h.app.media_control_source(),Some(actual));
+        assert_eq!(h.app.media.title,h.media.title);
+    }
+}
+
+#[test]
+fn music_source_keeps_paused_selection_and_rejects_late_other_player_samples() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=music_source_fixture();
+    h.app.set_lyrics("QQ 曲目","歌手",120.0,crate::lyrics::parse_lrc("[00:00]QQ 旧歌词"));
+    h.media.artwork=Some(std::sync::Arc::new(egui::ColorImage::new([8,8],egui::Color32::BLUE)));h.frame(vec![]);
+    open_music_source_list(&mut h);h.click_text(&crate::smtc::source_name("cloudmusic.exe"));h.frame(vec![]);
+    assert_eq!(h.app.settings.music_source,"cloudmusic.exe");
+    assert!(h.app.media.title.is_empty()&&h.app.ly.lyrics.is_none()&&h.app.music_artwork.is_none(),"旧来源晚到样本不能恢复歌曲、歌词和封面");
+    assert!(h.app.media_control_source().is_none());h.cmds.clear();h.click(H::local(210.5,118.0));
+    assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Media(_))),"等待指定来源时不能控制旧来源");
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"暂停的网易歌曲".into(),artist:"歌手".into(),duration:120.0,playing:false,playback_type:crate::smtc::MediaKind::Music,..Default::default()};h.frame(vec![]);
+    assert_eq!(h.app.media.title,"暂停的网易歌曲");assert!(!h.app.media.playing);assert_eq!(h.app.media_control_source(),Some("cloudmusic.exe"));
+    h.media_sources.retain(|source|source.id!="cloudmusic.exe");
+    h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"另一播放器正在播".into(),artist:"歌手".into(),playing:true,playback_type:crate::smtc::MediaKind::Music,..Default::default()};h.frame(vec![]);
+    assert!(h.app.media.title.is_empty());assert_eq!(h.app.settings.music_source,"cloudmusic.exe");
+    digest_visible_text(&h,&format!("等待 {}",crate::smtc::source_name("cloudmusic.exe")));
+    open_music_source_list(&mut h);digest_visible_text(&h,"暂无媒体");
+    h.click_text(&crate::smtc::source_name("cloudmusic.exe"));
+    assert!(!h.app.music_sources_open);assert_eq!(crate::model::Settings::load().music_source,"cloudmusic.exe");
+}
+
+#[test]
+fn music_source_list_scrolls_more_than_four_sources_inside_the_island() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=music_source_fixture();
+    h.media_sources=(0..10).map(|i|crate::smtc::Source{id:format!("player-{i}.exe"),name:format!("播放器 {i}"),playing:i%2==0}).collect();h.frame(vec![]);
+    open_music_source_list(&mut h);
+    assert!(!h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()=="播放器 9" && shape.clip_rect.contains_rect(text.visual_bounding_rect()))));
+    h.hover(H::local(220.0,90.0),0.1);h.wheel(-1200.0);h.hover(H::local(220.0,90.0),0.5);
+    let (rect,clip)=digest_visible_text(&h,"播放器 9");
+    assert!(h.hit.contains(rect.center())&&clip.expand(1.0).contains_rect(rect));
+    h.click_text("播放器 9");assert_eq!(h.app.settings.music_source,"player-9.exe");
+    assert_eq!(crate::model::Settings::load().music_source,"player-9.exe");assert!(!h.app.music_sources_open);
+}
+
+#[test]
+fn music_source_failed_save_keeps_selection_media_and_open_list() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=music_source_fixture();
+    open_music_source_list(&mut h);h.click_text(&crate::smtc::source_name("QQMusic.exe"));h.frame(vec![]);
+    h.app.set_lyrics("QQ 曲目","歌手",120.0,crate::lyrics::parse_lrc("[00:00]保留歌词"));
+    h.app.settings.load_error=Some("合成的配置读取失败".into());
+    open_music_source_list(&mut h);h.click_text(&crate::smtc::source_name("cloudmusic.exe"));h.frame(vec![]);
+    assert_eq!(h.app.settings.music_source,"QQMusic.exe");assert_eq!(crate::model::Settings::load().music_source,"QQMusic.exe");
+    assert!(h.app.music_sources_open);assert_eq!(h.app.media.title,"QQ 曲目");assert!(h.app.ly.lyrics.is_some());
+    h.app.settings.load_error=None;
+    h.click_text(&crate::smtc::source_name("cloudmusic.exe"));
+    assert_eq!(h.app.settings.music_source,"cloudmusic.exe");assert!(!h.app.music_sources_open);
+}
+
+#[test]
+fn music_source_settings_selection_and_timing_fit_small_window() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=music_source_fixture();h.app.settings_tab=1;h.app.open_settings();h.ctx.set_embed_viewports(false);
+    fn frame(h:&mut H,events:Vec<egui::Event>)->Vec<egui::epaint::ClippedShape>{
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+            let id=viewport.ids.this;let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(600.0,450.0))),viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.25),focused:Some(true),..Default::default()})).collect(),focused:true,events:events.clone(),..Default::default()};
+            *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+        });
+        let _=h.ctx.run(egui::RawInput::default(),|ctx|h.app.settings_ui(ctx,false));
+        let output=output.lock().unwrap().take().unwrap();output.shapes
+    }
+    fn rect(shapes:&[egui::epaint::ClippedShape],label:&str)->Rect{
+        shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Text(text) if text.galley.text()==label && shape.clip_rect.expand(1.0).contains_rect(text.visual_bounding_rect())=>Some(text.visual_bounding_rect()),_=>None}).unwrap_or_else(||panic!("设置中缺少完整可见的 {label}"))
+    }
+    fn click(h:&mut H,shapes:&[egui::epaint::ClippedShape],label:&str)->Vec<egui::epaint::ClippedShape>{
+        let pos=rect(shapes,label).center();frame(h,vec![egui::Event::PointerMoved(pos)]);
+        frame(h,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
+        frame(h,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);frame(h,vec![])
+    }
+    for _ in 0..4{frame(&mut h,vec![]);}
+    let shapes=frame(&mut h,vec![]);let window=Rect::from_min_max(Pos2::ZERO,egui::pos2(600.0,450.0));
+    for label in ["来源","自动选择","展开时显示歌词","岛上歌词","时间偏移","0.35 秒","−","+"] {assert!(window.contains_rect(rect(&shapes,label)),"{label} 不能被来源控件挤出窗口");}
+    let shapes=click(&mut h,&shapes,"自动选择");
+    let option=format!("{} · 正在播放",crate::smtc::source_name("QQMusic.exe"));click(&mut h,&shapes,&option);
+    assert_eq!(h.app.settings.music_source,"QQMusic.exe");assert_eq!(crate::model::Settings::load().music_source,"QQMusic.exe");
+    let shapes=frame(&mut h,vec![]);let shapes=click(&mut h,&shapes,&crate::smtc::source_name("QQMusic.exe"));click(&mut h,&shapes,"自动选择");
+    assert!(h.app.settings.music_source.is_empty());assert!(crate::model::Settings::load().music_source.is_empty());assert_eq!(h.app.settings.lyric_delay_ms,-350);
 }
