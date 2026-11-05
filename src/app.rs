@@ -196,6 +196,7 @@ pub(crate) struct LyricsState {
 /// v0.5.5：邮件面板与设置表单的界面状态。正文只在内存里过一次，不落盘。
 #[derive(Default)]
 pub(crate) struct MailState {
+    pub digests: crate::mail_digest::Digests,
     pub privacy:crate::mail_privacy::Privacy,
     pub invitations: mail::invites::Invitations,
     pub accounts: Vec<mail::Account>,
@@ -441,6 +442,9 @@ impl App {
             s.visuals.selection.bg_fill = theme::alpha_blue(0.45);
         });
         let settings = model::Settings::load();
+        let llm_config=crate::llm::Config::load();
+        let mut digests=crate::mail_digest::Digests::default();
+        digests.set_enabled(llm_config.enabled && llm_config.mail_digest);
         let (bw, bh) = if settings.minimal { (BAR_W_MIN, BAR_H_MIN) } else { (BAR_W, BAR_H) };
         let focus_seconds=settings.focus_minutes as f32*60.0;
         let initial_lyrics=settings.lyrics_enabled;
@@ -516,7 +520,7 @@ impl App {
             volume_a: 0.0,
             bt_shown: Vec::new(),
             bt_initialized: false,
-            mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
+            mail: MailState { digests, accounts: mail::load_accounts(), ..Default::default() },
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             updates: Default::default(),
@@ -562,6 +566,7 @@ impl App {
                 if !watching(&account) {return;}
                 self.mail.recent.retain(|item| !item.account.eq_ignore_ascii_case(&account));
                 self.mail.invitations.reset(&account);
+                self.mail.digests.reset(&account);
                 if self.mail.open_uid.as_ref().is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(&account)) {self.mail.open_uid = None;}
                 if self.mail.reading.as_ref().is_some_and(|item| item.account.eq_ignore_ascii_case(&account)) {self.mail.reading = None;}
                 self.mail.privacy.retain(&self.mail.recent);
@@ -587,6 +592,7 @@ impl App {
                 self.mail.recent.insert(0, item);
                 self.mail.recent.truncate(60);
                 self.mail.invitations.retain(&self.mail.recent);
+                self.mail.digests.retain(self.mail.recent.iter().chain(self.mail.reading.as_ref()));
                 self.mail.privacy.retain(&self.mail.recent);
                 if new && self.settings.mail_enabled {
                     let item=&self.mail.recent[0];
@@ -1170,6 +1176,7 @@ impl App {
     // ---------------------------------------------------------------
     pub fn frame(&mut self, ui: &mut egui::Ui, win: Rect, env: &Env) -> FrameOut {
         let ctx = ui.ctx().clone();
+        self.mail.digests.poll();
         let dt = match self.last_t {
             Some(t0) => (env.t - t0).clamp(0.0, 0.1) as f32,
             None => 0.0,

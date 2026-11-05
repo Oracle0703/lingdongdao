@@ -106,3 +106,98 @@ fn other_accounts_mail_between_invitation_and_cancellation_keeps_revision_state(
     receive(app, 9, &invitation("CANCEL", 2, "", ""));
     assert!(app.mail.recent.iter().all(|item| item.meeting.is_none()), "取消邮件必须撤销同账号的原邀请");
 }
+
+fn assert_open_reader_retains_digest_after_mail_list_eviction(state: crate::mail_digest::Digest) {
+    for reset_mailbox in [false, true] {
+        let mut fixture = Fixture::new();
+        let app = &mut fixture.app;
+        let ctx = egui::Context::default();
+        app.mail.digests.set_enabled(true);
+        let old = mail::Item {
+            account: "test@example.com".into(),
+            from: "sender@example.com".into(),
+            subject: "阅读中的旧邮件".into(),
+            time: String::new(),
+            code: None,
+            received_unix: None,
+            summary: "旧邮件正文应在阅读窗口继续保留。".into(),
+            links: vec![],
+            meeting: None,
+            uid: 1,
+        };
+        app.mail_event(mail::Event::Mail {
+            item: old.clone(),
+            new: true,
+            updates: vec![],
+        });
+        app.mail.reading = Some(old.clone());
+        app.mail.digests.insert_for_test(&old, state.clone());
+
+        for uid in 2..=76 {
+            let mut incoming = old.clone();
+            incoming.uid = uid;
+            incoming.subject = format!("新增邮件 {uid}");
+            app.mail_event(mail::Event::Mail {
+                item: incoming,
+                new: true,
+                updates: vec![],
+            });
+            assert_eq!(app.mail.reading.as_ref(), Some(&old));
+            assert_eq!(
+                app.mail.digests.get(&old),
+                Some(&state),
+                "第 {uid} 封邮件到达后，仍打开的阅读窗口不能失去 {state:?} 摘要"
+            );
+            // 模拟阅读窗口后续渲染：Ready 命中缓存，Pending 不重复排队，Failed 不隐式重试。
+            app.mail.digests.request(&old, &ctx);
+            assert_eq!(app.mail.digests.get(&old), Some(&state));
+            assert_eq!(app.mail.digests.request_count_for_test(), 0);
+            assert!(!app.mail.digests.worker_started_for_test());
+        }
+        assert_eq!(app.mail.recent.len(), 60);
+        assert!(app.mail.recent.iter().all(|item| item.uid != old.uid));
+
+        if reset_mailbox {
+            // UIDVALIDITY 重置必须连同独立阅读窗口及其列表外摘要一起失效。
+            app.mail_event(mail::Event::MailboxReset { account: old.account.clone() });
+            assert!(app.mail.recent.is_empty());
+            assert!(app.mail.reading.is_none());
+        } else {
+            app.mail.reading = None;
+            let mut incoming = old.clone();
+            incoming.uid = 77;
+            incoming.subject = "关闭阅读窗口后的新邮件".into();
+            app.mail_event(mail::Event::Mail {
+                item: incoming,
+                new: true,
+                updates: vec![],
+            });
+            assert_eq!(app.mail.recent.len(), 60);
+        }
+        assert!(
+            app.mail.digests.get(&old).is_none(),
+            "关闭阅读窗口后收到新邮件或邮箱重置后，旧摘要必须被清理：{state:?}"
+        );
+        assert_eq!(app.mail.digests.request_count_for_test(), 0);
+        assert!(!app.mail.digests.worker_started_for_test());
+    }
+}
+
+#[test]
+fn open_reader_ready_digest_survives_mail_list_eviction() {
+    assert_open_reader_retains_digest_after_mail_list_eviction(
+        crate::mail_digest::Digest::Ready("请在明天下午参加评审。".into()),
+    );
+}
+
+#[test]
+fn open_reader_pending_digest_survives_mail_list_eviction() {
+    assert_open_reader_retains_digest_after_mail_list_eviction(crate::mail_digest::Digest::Pending);
+}
+
+#[test]
+fn open_reader_failed_digest_survives_mail_list_eviction() {
+    assert_open_reader_retains_digest_after_mail_list_eviction(
+        crate::mail_digest::Digest::Failed("模型服务暂时不可用，请稍后重试".into()),
+    );
+}

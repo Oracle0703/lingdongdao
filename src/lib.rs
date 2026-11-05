@@ -23,6 +23,7 @@ pub mod llm;
 mod llm_ui;
 pub mod lyrics;
 pub mod mail;
+mod mail_digest;
 mod mail_reader;
 mod task_picker;
 pub mod model;

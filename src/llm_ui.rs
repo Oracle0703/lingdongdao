@@ -93,29 +93,36 @@ impl State {
         self.set_note(Ok(note.into()));
     }
 
-    fn save(&mut self) {
-        let Some(config) = self.config.clone() else { return };
+    fn save(&mut self) -> Option<llm::Config> {
+        let config = self.config.clone()?;
         if config.enabled {
             if let Err(error) = llm::endpoint(&config.base_url, "chat/completions") {
-                return self.set_note(Err(error));
+                self.set_note(Err(error));
+                return None;
             }
             if config.model.trim().is_empty() {
-                return self.set_note(Err("请先填写模型名称".into()));
+                self.set_note(Err("请先填写模型名称".into()));
+                return None;
             }
         }
         if !self.key_input.trim().is_empty() {
             if let Err(error) = llm::secrets::save(&self.key_input) {
-                return self.set_note(Err(error));
+                self.set_note(Err(error));
+                return None;
             }
             self.key_input.clear();
             self.has_key = true;
         }
         match config.save() {
             Ok(()) => {
-                self.saved = Some(config);
+                self.saved = Some(config.clone());
                 self.set_note(Ok("已保存".into()));
+                Some(config)
             }
-            Err(error) => self.set_note(Err(format!("保存失败：{error}"))),
+            Err(error) => {
+                self.set_note(Err(format!("保存失败：{error}")));
+                None
+            }
         }
     }
 }
@@ -137,6 +144,7 @@ impl App {
             ui.add_space(4.0);
             settings_card(ui, |ui| {
                 setting_row(ui, "启用大模型", "关闭时不会向模型服务发送任何内容", &mut config.enabled);
+                setting_row(ui, "邮件摘要", "打开邮件详情时生成一句话摘要；验证码邮件不会发送", &mut config.mail_digest);
                 ui.separator();
                 let label = 72.0;
                 let gap = ui.spacing().item_spacing.x;
@@ -219,9 +227,7 @@ impl App {
         if list {
             state.spawn(&ctx, "正在获取模型列表…", |client| Outcome::Models(client.models()));
         }
-        if save {
-            state.save();
-        }
+        let saved_config = if save { state.save() } else { None };
         if clear {
             llm::secrets::delete();
             state.has_key = false;
@@ -246,5 +252,51 @@ impl App {
         ] {
             ui.label(egui::RichText::new(line).size(12.0).color(dim));
         }
+        if let Some(config) = saved_config {
+            self.mail.digests.set_enabled(config.enabled && config.mail_digest);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saving_digest_settings_notifies_only_after_config_is_committed() {
+        struct DataDirectory {
+            previous: Option<std::ffi::OsString>,
+            path: std::path::PathBuf,
+        }
+        impl Drop for DataDirectory {
+            fn drop(&mut self) {
+                if let Some(previous) = &self.previous { std::env::set_var("DAOZAI_DATA_DIR", previous); }
+                else { std::env::remove_var("DAOZAI_DATA_DIR"); }
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
+        }
+        let directory = DataDirectory {
+            previous: std::env::var_os("DAOZAI_DATA_DIR"),
+            path: std::env::temp_dir().join(format!("daozai-llm-digest-save-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap())),
+        };
+        std::fs::create_dir_all(directory.path.join("llm.txt")).unwrap();
+        std::env::set_var("DAOZAI_DATA_DIR", &directory.path);
+        let draft = llm::Config { enabled: true, mail_digest: true, base_url: "http://127.0.0.1:1234/v1".into(), ..Default::default() };
+        let mut state = State { config: Some(draft.clone()), saved: Some(llm::Config::default()), ..Default::default() };
+        assert!(state.save().is_none(), "写入失败不能通知 App 启用摘要");
+        assert_eq!(state.config, Some(draft.clone()), "失败后保留表单以便重试");
+        assert_eq!(state.saved, Some(llm::Config::default()));
+        assert!(state.note_error && state.note.contains("保存失败"));
+        std::fs::remove_dir(directory.path.join("llm.txt")).unwrap();
+        let saved = state.save().expect("保存成功才返回生效配置");
+        assert!(saved.enabled && saved.mail_digest);
+        assert_eq!(llm::Config::load(), draft);
+        state.config.as_mut().unwrap().enabled = false;
+        let saved = state.save().unwrap();
+        assert!(!(saved.enabled && saved.mail_digest), "总开关关闭时摘要也必须停用");
+        state.config.as_mut().unwrap().enabled = true;
+        state.config.as_mut().unwrap().base_url.clear();
+        assert!(state.save().is_none(), "校验失败不能通知 App 启用摘要");
+        assert!(!llm::Config::load().enabled);
     }
 }
