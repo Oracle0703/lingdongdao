@@ -47,6 +47,9 @@ impl App {
                             Some(crate::mail_digest::Digest::Failed(error))=>{
                                 if ui.add(egui::Link::new(egui::RichText::new("AI 摘要失败，点击重试").size(14.0).color(Color32::from_gray(160)))).on_hover_text(error).clicked(){self.mail.digests.retry(&raw,ui.ctx());}
                             },
+                            None if self.mail.digests.is_skipped(&raw)=>{
+                                if ui.add(egui::Link::new(egui::RichText::new("生成 AI 摘要").size(14.0).color(crate::theme::BLUE))).clicked(){self.mail.digests.retry(&raw,ui.ctx());}
+                            },
                             None=>{},
                         }
                     }

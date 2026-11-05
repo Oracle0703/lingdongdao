@@ -592,7 +592,7 @@ impl App {
                 self.mail.recent.insert(0, item);
                 self.mail.recent.truncate(60);
                 self.mail.invitations.retain(&self.mail.recent);
-                self.mail.digests.retain(&self.mail.recent);
+                self.mail.digests.retain(self.mail.recent.iter().chain(self.mail.reading.as_ref()));
                 self.mail.privacy.retain(&self.mail.recent);
                 if new && self.settings.mail_enabled {
                     let item=&self.mail.recent[0];

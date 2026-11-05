@@ -4383,6 +4383,62 @@ fn mail_digest_pending_and_failed_render_without_automatic_retry() {
 }
 
 #[test]
+fn mail_digest_skipped_details_wait_for_an_explicit_generate_click() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for reader in [false,true] {
+        let mut h=H::new();let item=digest_test_mail();
+        // 即使点击真的启动worker，临时配置也会在创建客户端前拒绝，既不发网也不读keyring。
+        crate::llm::Config::default().save().unwrap();
+        digest_open_island(&mut h,&item);
+        h.app.mail.digests.set_enabled(true);h.app.mail.digests.skip_for_test(&item);
+        for _ in 0..20 {
+            h.frame(vec![]);
+            if reader {digest_reader_frame(&mut h,&item);}
+            let (rect,clip)=digest_visible_text(&h,"生成 AI 摘要");
+            assert!(clip.expand(1.0).contains_rect(rect),"手动生成入口必须可见");
+            digest_visible_text(&h,item.summary.as_ref());
+            assert!(h.app.mail.digests.is_skipped(&item));
+            assert_eq!(h.app.mail.digests.request_count_for_test(),0,"连续显示被跳过邮件不能自动请求");
+            assert!(!h.app.mail.digests.worker_started_for_test());
+        }
+        if reader {
+            let (rect,_)=digest_visible_text(&h,"生成 AI 摘要");let pos=rect.center();
+            for pressed in [true,false] {
+                digest_reader_frame_with_events(&mut h,&item,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);
+            }
+        }else{h.click_text("生成 AI 摘要");}
+        assert_eq!(h.app.mail.digests.request_count_for_test(),1,"点击手动生成入口应只入队一次");
+        assert!(!h.app.mail.digests.is_skipped(&item),"点击应清除跳过状态");
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(2);
+        while !matches!(h.app.mail.digests.get(&item),Some(crate::mail_digest::Digest::Failed(_))) {
+            h.frame(vec![]);
+            assert!(std::time::Instant::now()<deadline,"关闭的测试配置应立即拒绝后台任务");
+            std::thread::yield_now();
+        }
+        h.frame(vec![]);if reader {digest_reader_frame(&mut h,&item);}
+        digest_visible_text(&h,"AI 摘要失败，点击重试");
+        assert_eq!(h.app.mail.digests.request_count_for_test(),1,"结果渲染不能再次请求");
+    }
+}
+
+#[test]
+fn mail_digest_skipped_prompt_stays_hidden_when_disabled_or_raw_mail_has_otp() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for otp in [false,true] {
+        let mut h=H::new();let mut item=digest_test_mail();
+        crate::llm::Config::default().save().unwrap();
+        if otp {item.code=Some("123456".into());assert!(h.app.display_mail(&item).code.is_none());}
+        h.app.mail.digests.set_enabled(otp);h.app.mail.digests.skip_for_test(&item);
+        digest_open_island(&mut h,&item);
+        for reader in [false,true] {
+            if reader {digest_reader_frame(&mut h,&item);digest_reader_frame(&mut h,&item);}
+            assert!(!h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()=="生成 AI 摘要")));
+            assert_eq!(h.app.mail.digests.request_count_for_test(),0);assert!(!h.app.mail.digests.worker_started_for_test());
+        }
+    }
+}
+
+#[test]
 #[ignore="自动化UI与真实本机模型联通验收；需DAOZAI_LLM_URL和DAOZAI_LLM_MODEL，只允许回环地址"]
 fn mail_digest_live_ui_acceptance() {
     use crate::mail_digest::Digest;

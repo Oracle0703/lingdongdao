@@ -106,6 +106,10 @@ impl Digests {
         self.entries.get(&key(item)).map(|entry| &entry.digest)
     }
 
+    pub fn is_skipped(&self, item: &mail::Item) -> bool {
+        self.enabled && eligible(item) && self.skipped_visible.contains(&key(item))
+    }
+
     pub fn request(&mut self, item: &mail::Item, ctx: &egui::Context) {
         if !self.enabled || !eligible(item) {
             return;
@@ -224,9 +228,9 @@ impl Digests {
         }
     }
 
-    pub fn retain(&mut self, items: &[mail::Item]) {
+    pub fn retain<'a>(&mut self, items: impl IntoIterator<Item = &'a mail::Item>) {
         let keep: HashSet<_> = items
-            .iter()
+            .into_iter()
             .filter(|item| eligible(item))
             .map(key)
             .collect();
@@ -285,6 +289,14 @@ impl Digests {
                 digest,
             },
         );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn skip_for_test(&mut self, item: &mail::Item) {
+        let item_key = key(item);
+        self.cancel_where(|key| *key == item_key);
+        self.visible.insert(item_key.clone());
+        self.skipped_visible.insert(item_key);
     }
 
     #[cfg(test)]
@@ -510,7 +522,7 @@ fn safe_error(error: &str) -> String {
             return message.into();
         }
     }
-    "摘要生成失败，请检查模型服务后重试".into()
+    "摘要生成失败，可在设置 → 大模型中点击「测试连接」查看详情".into()
 }
 
 #[cfg(test)]
@@ -1124,45 +1136,8 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
-    #[ignore = "隔离 worker/egui 上下文：各采样 6 秒 CPU 与重绘回调，不运行原生 GUI 或真实模型"]
-    fn pending_cpu_and_repaint_sample() {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetCurrentProcess() -> *mut std::ffi::c_void;
-            fn GetProcessTimes(
-                process: *mut std::ffi::c_void,
-                created: *mut u64,
-                exited: *mut u64,
-                kernel: *mut u64,
-                user: *mut u64,
-            ) -> i32;
-        }
-        fn process_cpu_seconds() -> f64 {
-            let (mut created, mut exited, mut kernel, mut user) = (0, 0, 0, 0);
-            unsafe {
-                assert_ne!(
-                    GetProcessTimes(
-                        GetCurrentProcess(),
-                        &mut created,
-                        &mut exited,
-                        &mut kernel,
-                        &mut user,
-                    ),
-                    0
-                );
-            }
-            (kernel + user) as f64 / 10_000_000.0
-        }
-        fn sample() -> (f64, f64) {
-            let cpu = process_cpu_seconds();
-            let started = Instant::now();
-            // 测量窗口内不驱动 egui 帧、不 poll 结果，也不执行真实网络请求。
-            std::thread::sleep(Duration::from_secs(6));
-            (started.elapsed().as_secs_f64(), process_cpu_seconds() - cpu)
-        }
-
+    fn pending_does_not_request_repaint_and_completion_wakes_both_details() {
         let ctx = egui::Context::default();
         let reader = egui::ViewportId::from_hash_of("daozai-mail-reader");
         for viewport_id in [egui::ViewportId::ROOT, reader] {
@@ -1177,26 +1152,20 @@ mod tests {
                 let _ = ctx.run(input, |_| {});
             }
         }
-        let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observed_callbacks = callbacks.clone();
         let (wake_tx, wake_rx) = mpsc::channel();
         ctx.set_request_repaint_callback(move |info| {
-            observed_callbacks.fetch_add(1, Ordering::SeqCst);
             let _ = wake_tx.send(info);
         });
 
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let release = Mutex::new(release_rx);
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observed_calls = calls.clone();
         let mut digests = fake(move |_| {
-            observed_calls.fetch_add(1, Ordering::SeqCst);
             started_tx.send(()).unwrap();
             release
                 .lock()
                 .unwrap()
-                .recv_timeout(Duration::from_secs(30))
+                .recv_timeout(Duration::from_secs(5))
                 .unwrap();
             Ok("请在明天下午参加评审。".into())
         });
@@ -1204,36 +1173,18 @@ mod tests {
         digests.set_enabled(false);
         digests.request(&mail, &ctx);
         assert!(!digests.worker_started_for_test());
-        let (disabled_wall, disabled_cpu) = sample();
-        println!(
-            "scope=isolated-worker-egui-context native_gui=false real_model=false sample=disabled wall_secs={disabled_wall:.3} process_cpu_secs={disabled_cpu:.6} one_core_percent={:.3} repaint_callbacks={} executor_calls={}",
-            disabled_cpu / disabled_wall * 100.0,
-            callbacks.load(Ordering::SeqCst), calls.load(Ordering::SeqCst)
-        );
-        assert_eq!(callbacks.load(Ordering::SeqCst), 0);
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(wake_rx.try_recv().is_err());
 
         digests.set_enabled(true);
         digests.request(&mail, &ctx);
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let (pending_wall, pending_cpu) = sample();
-        println!(
-            "scope=isolated-worker-egui-context native_gui=false real_model=false sample=pending wall_secs={pending_wall:.3} process_cpu_secs={pending_cpu:.6} one_core_percent={:.3} repaint_callbacks={} executor_calls={}",
-            pending_cpu / pending_wall * 100.0,
-            callbacks.load(Ordering::SeqCst), calls.load(Ordering::SeqCst)
-        );
+        for _ in 0..100 {
+            digests.poll();
+            digests.request(&mail, &ctx);
+        }
         assert_eq!(digests.get(&mail), Some(&Digest::Pending));
-        assert_eq!(
-            callbacks.load(Ordering::SeqCst),
-            0,
-            "等待期间不应自发唤醒重绘"
-        );
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "等待期间不能重复执行任务或主动重试"
-        );
-        assert!(wake_rx.try_recv().is_err());
+        assert_eq!(digests.request_count_for_test(), 1);
+        assert!(wake_rx.try_recv().is_err(), "等待期间不能安排重绘");
 
         release_tx.send(()).unwrap();
         let first = wake_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1244,8 +1195,7 @@ mod tests {
         assert!(awakened.contains(&egui::ViewportId::ROOT) && awakened.contains(&reader));
         digests.poll();
         assert!(matches!(digests.get(&mail), Some(Digest::Ready(_))));
-        assert_eq!(callbacks.load(Ordering::SeqCst), 2);
-        println!("sample=completed root_wakeups=1 reader_wakeups=1 summary_ready=true cpu_threshold_asserted=false");
+        assert!(wake_rx.try_recv().is_err(), "完成后每个窗口只唤醒一次");
     }
 
     #[test]

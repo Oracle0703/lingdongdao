@@ -804,6 +804,9 @@ impl App {
                     Some(crate::mail_digest::Digest::Failed(error))=>{
                         if ui.add(egui::Link::new(egui::RichText::new("AI 摘要失败，点击重试").font(c.font(12.0,W::Regular)).color(theme::GRAY))).on_hover_text(error).clicked(){self.mail.digests.retry(raw,ui.ctx());}
                     },
+                    None if self.mail.digests.is_skipped(raw)=>{
+                        if ui.add(egui::Link::new(egui::RichText::new("生成 AI 摘要").font(c.font(12.0,W::Regular)).color(theme::BLUE))).clicked(){self.mail.digests.retry(raw,ui.ctx());}
+                    },
                     None=>{},
                 }
             }
