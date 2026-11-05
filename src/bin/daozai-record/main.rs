@@ -445,6 +445,7 @@ fn main() {
             idle_seconds:None,
             browser_at_top:None,
             media: media.np.clone(),
+            media_sources: Vec::new(),
             volume: Some((62, false)),
             bt: Vec::new(),
             bt_ready: true,

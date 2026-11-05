@@ -123,6 +123,8 @@ pub struct Settings {
     pub notification_preview:bool,
     pub notifications: bool,
     pub sound: bool,
+    /// 空值为自动选择；非空时只跟随该本机媒体来源。
+    pub music_source:String,
     pub lyrics_enabled:bool,
     pub island_lyrics:bool,
     pub lyric_delay_ms:i32,
@@ -148,7 +150,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
@@ -202,6 +204,7 @@ impl Settings {
                 "bluetooth_notifications" => s.bluetooth_notifications = v != "0",
                 "notifications" => s.notifications = v != "0",
                 "sound" => s.sound = v == "1",
+                "music_source" => s.music_source=v.trim().to_string(),
                 "lyrics_enabled" => s.lyrics_enabled=v!="0",
                 "island_lyrics" => s.island_lyrics=v=="1",
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
@@ -251,6 +254,7 @@ impl Settings {
                 ("bluetooth_notifications".into(), (self.bluetooth_notifications as u8).to_string()),
                 ("notifications".into(), (self.notifications as u8).to_string()),
                 ("sound".into(), (self.sound as u8).to_string()),
+                ("music_source".into(),self.music_source.replace(['\r','\n'],"")),
                 ("lyrics_enabled".into(),(self.lyrics_enabled as u8).to_string()),
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),

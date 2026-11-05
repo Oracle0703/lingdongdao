@@ -847,6 +847,7 @@ impl App {
             }
             if ctx.input(|i|i.viewport().close_requested()){self.settings_open=false;}
             let before=self.settings.clone();
+            let mut music_source_choice=None;
             egui::SidePanel::left("settings-sidebar").resizable(false).exact_width(180.0).frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(29,29,32),Color32::from_rgb(237,239,243))).stroke(egui::Stroke::new(1.0,settings_color(ctx,Color32::from_rgb(42,42,45),Color32::from_rgb(216,219,225)))).inner_margin(egui::Margin::symmetric(10,12))).show(ctx,|ui|{
                 ui.add_space(5.0);
                 ui.label(egui::RichText::new("设置").size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105))));
@@ -1042,6 +1043,20 @@ impl App {
                     1=>{
                         settings_label(ui,"歌词");
                         settings_card(ui,|ui|{
+                            let choices=self.music_source_choices();
+                            let mut source=self.settings.music_source.clone();
+                            let label=choices.iter().find(|(id,_,_)|if id.is_empty(){source.is_empty()}else{!source.is_empty()&&crate::smtc::source_matches(&source,id)}).map(|(_,name,_)|name.clone()).unwrap_or_else(||crate::smtc::source_name(&source));
+                            settings_control_row(ui,"来源",60.0,|ui|{
+                                egui::ComboBox::from_id_salt("music-source-setting").selected_text(label).width(210.0).show_ui(ui,|ui|{
+                                    for (id,name,status) in &choices {
+                                        let label=if id.is_empty(){name.clone()}else{format!("{name} · {status}")};
+                                        ui.selectable_value(&mut source,id.clone(),label);
+                                    }
+                                }).response
+                            });
+                            if source!=self.settings.music_source{music_source_choice=Some(source);}
+                            ui.small("手动选择后保持来源；暂无媒体时等待恢复。");
+                            ui.separator();
                             setting_row(ui,"展开时显示歌词","在播放器右侧同步滚动显示歌词",&mut self.settings.lyrics_enabled);
                             self.show_lyrics=self.settings.lyrics_enabled;
                             ui.separator();
@@ -1389,7 +1404,8 @@ impl App {
                 });
             });
             self.avoidance.dialog(ctx,&mut self.settings);
-            if format!("{before:?}")!=format!("{:?}",self.settings){self.persist_settings(before);}
+            let settings_saved=if format!("{before:?}")!=format!("{:?}",self.settings){self.persist_settings(before)}else{true};
+            if settings_saved {if let Some(source)=music_source_choice{self.set_music_source(&source);}}
             ctx.set_style(original_style);
         });
     }

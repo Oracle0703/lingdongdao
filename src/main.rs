@@ -15,6 +15,7 @@ struct Shell {
     #[cfg(windows)]
     frame_at: Instant,
     media: smtc::Shared,
+    media_sources: smtc::Sources,
     seek_rx: Option<std::sync::mpsc::Receiver<bool>>,
     media_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     placed: bool,
@@ -78,7 +79,8 @@ impl Shell {
         if let Ok(mode)=std::env::var("DAOZAI_QUOTA_DEMO"){app.quota_demo(&mode);}
         diagnostics::startup("初始化媒体和托盘");
         let media = smtc::shared();
-        let media_enabled=smtc::spawn_poller(media.clone(),cc.egui_ctx.clone());
+        let media_sources=std::sync::Arc::new(std::sync::Mutex::new(smtc::SourceState{preferred:app.settings.music_source.clone(),..Default::default()}));
+        let media_enabled=smtc::spawn_poller_with_sources(media.clone(),cc.egui_ctx.clone(),media_sources.clone());
         media_enabled.store(app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
         #[cfg(windows)]
         let autostart = daozai::tray::autostart_enabled();
@@ -102,6 +104,7 @@ impl Shell {
             #[cfg(windows)]
             frame_at: Instant::now(),
             media,
+            media_sources,
             seek_rx: None,
             media_enabled,
             placed: false,
@@ -202,6 +205,7 @@ impl Shell {
                 #[cfg(not(windows))] {None}
             },
             media: self.media.lock().map(|m| m.clone()).unwrap_or_default(),
+            media_sources: self.media_sources.lock().map(|sources|sources.available.clone()).unwrap_or_default(),
             volume: self.system_state.volume,
             bt: self.bt.clone(),
             bt_ready: self.bt_ready,
@@ -216,6 +220,7 @@ impl eframe::App for Shell {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.media_enabled.store(self.app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut sources)=self.media_sources.lock(){sources.preferred.clone_from(&self.app.settings.music_source);}
         #[cfg(windows)]
         {
             // 用帧间隔限制刷新，绕过部分 Intel 驱动在垂直同步中的忙等待。
@@ -349,7 +354,7 @@ impl eframe::App for Shell {
         for cmd in out.cmds {
             match cmd {
                 Cmd::Media(t) => {
-                    let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
+                    let Some(source)=self.app.media_control_source().map(str::to_owned) else{continue;};
                     if let smtc::Transport::Seek(seconds)=t {
                         let (tx,rx)=std::sync::mpsc::channel();self.seek_rx=Some(rx);
                         let ctx=ctx.clone();
@@ -424,6 +429,7 @@ impl eframe::App for Shell {
         #[cfg(windows)] let autostart = self.autostart;
         #[cfg(not(windows))] let autostart = false;
         self.app.settings_ui(ctx, autostart);
+        if let Ok(mut sources)=self.media_sources.lock(){sources.preferred.clone_from(&self.app.settings.music_source);}
         self.app.mail_reader_ui(ctx);
         #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;
