@@ -13,7 +13,13 @@ pub(crate) struct State {
 }
 impl State {
     pub fn load()->Self {Self{config:if cfg!(test){Config::default()}else{Config::load()},..Default::default()}}
-    pub fn receive(&mut self,event:quota::Event){self.busy.remove(&event.id);if self.config.accounts.iter().any(|a|a.id==event.id && a.enabled){self.rows.insert(event.id,event.result);}}
+    pub fn receive(&mut self,event:quota::Event){
+        let Some(account)=self.config.accounts.iter().find(|a|a.id==event.id) else {self.busy.remove(&event.id);return;};
+        // 停用或删除后不会再有新结果，必须清除 busy，否则页面一直显示“更新中”且无法刷新。
+        if !(self.config.enabled && account.enabled){self.busy.remove(&event.id);return;}
+        // 改绑后旧请求的结果作废；配置变化会发出新请求，busy 等新结果再清除。
+        if account.request_key()==event.request_key{self.busy.remove(&event.id);self.rows.insert(event.id,event.result);}
+    }
 }
 fn accent_color(accent:Accent,provider:Provider)->Color32{
     let accent=if accent==Accent::Brand{match provider{Provider::Codex=>Accent::Violet,Provider::Claude=>Accent::Orange,Provider::Kimi=>Accent::Blue,Provider::GrokBot=>Accent::Green,Provider::Gemini=>Accent::Cyan}}else{accent};
@@ -101,16 +107,24 @@ fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
     at.format(format).to_string()
 }
 impl App {
+    fn persist_quota(&mut self,previous:Config)->bool {
+        if let Err(error)=self.quota.config.save(){
+            self.quota.config=previous;
+            self.quota.note=format!("额度设置保存失败：{error}");
+            self.say(self.quota.note.clone());
+            false
+        }else{true}
+    }
     pub(crate) fn quota_tick(&mut self){
         let result=self.quota.gemini_connecting.as_ref().and_then(|connect|connect.poll());
         if let Some(result)=result{
             self.quota.gemini_connecting=None;
-            match result{Ok(connected)=>{let id=self.quota.config.connect_gemini(connected.slot,connected.label);self.quota.rows.insert(id,Ok(connected.snapshot));self.quota.config.save();self.quota.gemini_cookie.clear();self.quota.note="Gemini 已连接".into();self.pending.push(Cmd::QuotaConnected);},Err(error)=>self.quota.note=error}
+            match result{Ok(connected)=>{let before=self.quota.config.clone();let id=self.quota.config.connect_gemini(connected.slot,connected.label);if self.persist_quota(before){self.quota.rows.insert(id,Ok(connected.snapshot));self.quota.gemini_cookie.clear();self.quota.note="Gemini 已连接".into();self.pending.push(Cmd::QuotaConnected);}},Err(error)=>self.quota.note=error}
         }
         let result=self.quota.login.as_ref().and_then(|login|login.poll());
         if let Some(result)=result{
             self.quota.login=None;
-            match result{Ok(connected)=>{self.quota.config.connect_grok(connected.slot,connected.label);self.quota.config.save();self.quota.note="Grok Bot 已连接".into();self.pending.push(Cmd::QuotaConnected);},Err(error)=>self.quota.note=error}
+            match result{Ok(connected)=>{let before=self.quota.config.clone();self.quota.config.connect_grok(connected.slot,connected.label);if self.persist_quota(before){self.quota.note="Grok Bot 已连接".into();self.pending.push(Cmd::QuotaConnected);}},Err(error)=>self.quota.note=error}
         }
     }
     fn quota_login(&mut self,alias:String){
@@ -118,7 +132,7 @@ impl App {
         match quota::grok::Login::start(alias){Ok((login,url))=>{self.quota.login=Some(login);self.quota.note="请在浏览器中完成登录，账号会自动添加".into();self.pending.push(Cmd::OpenUrl(url));},Err(error)=>self.quota.note=error}
     }
     pub fn quota_config(&self)->&Config{&self.quota.config}
-    pub fn quota_initialize(&mut self){if !crate::model::config_dir().join("ai-quota.json").exists(){self.quota.config.discover();self.quota.config.save();}}
+    pub fn quota_initialize(&mut self){if !crate::model::config_dir().join("ai-quota.json").exists(){let before=self.quota.config.clone();self.quota.config.discover();self.persist_quota(before);}}
     pub fn quota_pending(&mut self,accounts:&[Account]){self.quota.busy.extend(accounts.iter().map(|a|a.id.clone()));}
     pub fn quota_event(&mut self,event:quota::Event){self.quota.receive(event);}
     pub fn quota_set_source(&mut self,path:std::path::PathBuf){self.quota.source=path.to_string_lossy().into_owned();}
@@ -139,7 +153,7 @@ impl App {
             if bar_tooltip(c.hit(x-14.0,1.0,28.0,28.0,("quota-pin",&a.id)),format!("{} · {}\n{}",a.provider.name(),a.alias,summary)).clicked(){chosen=Some(a.id.clone());}
         }
         if let Some(x)=layout.x[crate::bar_layout::MORE] {let alpha=layout.pet_clearance(crate::bar_layout::MORE);let faded=c.faded(alpha);let faded=if alpha<0.8{faded.ghost()}else{faded};let c=&faded;let x=cx+x;c.text(x,20.0,&format!("+{}",indices.len()-3),8.0,W::Regular,theme::GRAY,H::Center);if bar_tooltip(c.hit(x-11.0,3.0,22.0,25.0,"quota-more"),"查看全部账号".into()).clicked(){self.show_page(6);}}
-        if let Some(id)=chosen{self.quota.config.selected=id;self.quota.config.save();self.show_page(6);}
+        if let Some(id)=chosen{let before=self.quota.config.clone();self.quota.config.selected=id;self.persist_quota(before);self.show_page(6);}
     }
     pub(crate) fn page_quota(&mut self,c:&Card){
         if c.hit(303.0,8.0,32.0,21.0,"quota-refresh").on_hover_text("刷新额度").clicked(){self.pending.push(Cmd::QuotaRefresh);}
@@ -153,7 +167,7 @@ impl App {
         let pos=indices.iter().position(|i|*i==selected).unwrap_or(0);let start=pos/3*3;let mut picked=None;
         if indices.len()>3{for (x,offset,label)in [(42.0,-1isize,"‹"),(357.0,1,"›")]{if c.hit(x-7.0,30.0,18.0,19.0,("quota-account-next",offset)).clicked(){picked=Some(indices[(pos as isize+offset).rem_euclid(indices.len() as isize) as usize]);}c.text(x+2.0,44.0,label,13.0,W::Regular,theme::GRAY,H::Center);}}
         for (column,index)in indices.iter().skip(start).take(3).enumerate(){let a=&self.quota.config.accounts[*index];let x=59.0+column as f32*99.0;let on=*index==selected;let colors=accent_colors(&self.quota.config,a);let color=colors[0];let(r,b)=crate::paint::capsule(c,x,30.0,94.0,21.0,&format!("quota-account-{}",a.id),if on{Color32::from_rgb(color.r()/5,color.g()/5,color.b()/5)}else{Color32::BLACK},theme::BTN_HOVER);let text=b.fit(&a.alias,10.5,W::Regular,84.0);b.text(x+47.0,45.0,&text,10.5,W::Regular,if on{colors[1]}else{theme::GRAY},H::Center);if r.on_hover_text(format!("{} · {}",a.provider.name(),a.alias)).clicked(){picked=Some(*index);}}
-        if let Some(i)=picked{self.quota.config.selected=self.quota.config.accounts[i].id.clone();self.quota.config.save();}
+        if let Some(i)=picked{let before=self.quota.config.clone();self.quota.config.selected=self.quota.config.accounts[i].id.clone();self.persist_quota(before);}
         let a=&self.quota.config.accounts[selected];let result=self.quota.rows.get(&a.id);let snapshot=result.and_then(|r|r.as_ref().ok());
         let colors=accent_colors(&self.quota.config,a);ring(c,a,snapshot,103.0,89.0,70.0,colors);
         let raw_plan=snapshot.map(|s|s.plan.as_str()).unwrap_or_default();let plan=match raw_plan{"pro"|"prolite"|"pro_lite"=>"Pro","plus"=>"Plus","free"=>"Free","team"|"business"=>"Business","enterprise"=>"Enterprise",other=>other};let label=if plan.is_empty(){a.provider.name().to_owned()}else{format!("{} · {}",a.provider.name(),plan)};
@@ -175,16 +189,17 @@ impl App {
         }else{let message=if self.quota.busy.contains(&a.id){"正在更新额度…"}else{result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新额度")};for(i,line)in c.wrap(message,11.0,W::Regular,197.0,2).iter().enumerate(){c.text(157.0,87.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
     }
     pub(crate) fn quota_settings(&mut self,ui:&mut egui::Ui){
-        let before=self.quota.config.clone();settings_label(ui,"显示");settings_card(ui,|ui|{
+        if let Some(error)=&self.quota.config.load_error{ui.label(egui::RichText::new(error).color(theme::RED));}
+        let before=self.quota.config.clone();let form_before=(self.quota.alias.clone(),self.quota.source.clone());settings_label(ui,"显示");settings_card(ui,|ui|{
             setting_row(ui,"AI 额度","每 3 分钟自动更新，可手动刷新",&mut self.quota.config.enabled);ui.separator();
             setting_row(ui,"收起时显示圆环","常驻账号最多显示 3 个，点击查看详情",&mut self.quota.config.compact);
         });
-        settings_label(ui,"账号");let mut remove=None;let mut reconnect=None;let mut gemini_reconnect=None;
+        settings_label(ui,"账号");let mut remove=None;let mut reconnect=None;let mut gemini_reconnect=None;let mut rebind=None;
         settings_card(ui,|ui|{
             if self.quota.config.accounts.is_empty(){ui.label("还没有添加账号。可识别本机登录，或在下方连接其他账号。");}
-            for a in &mut self.quota.config.accounts{ui.push_id(&a.id,|ui|{
+            for a in &mut self.quota.config.accounts{ui.push_id(a.id.clone(),|ui|{
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{ui.label(egui::RichText::new(a.provider.name()).strong());ui.add_sized([150.0,25.0],egui::TextEdit::singleline(&mut a.alias).vertical_align(egui::Align::Center).hint_text("账号备注"));if a.provider==Provider::GrokBot && ui.add_enabled(self.quota.login.is_none(),egui::Button::new("重新连接").small()).clicked(){reconnect=Some(a.alias.clone());}if a.provider==Provider::Gemini && ui.add_enabled(self.quota.gemini_connecting.is_none(),egui::Button::new("重新连接").small()).clicked(){gemini_reconnect=Some((a.alias.clone(),a.slot.clone()));}if ui.add_enabled(a.provider!=Provider::Gemini || self.quota.gemini_connecting.is_none(),egui::Button::new("移除").small()).clicked(){remove=Some(a.id.clone());}});
-                ui.horizontal(|ui|{ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻刘海");if ui.selectable_label(self.quota.config.selected==a.id,"当前账号").clicked(){self.quota.config.selected=a.id.clone();}});
+                ui.horizontal(|ui|{ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻刘海");if ui.selectable_label(self.quota.config.selected==a.id,"当前账号").clicked(){self.quota.config.selected=a.id.clone();}if a.references_cli()&&ui.small_button("重新绑定当前登录").on_hover_text("确认将此条目绑定到登录文件中的当前账号").clicked(){rebind=Some(a.id.clone());}});
                 let mut color=self.quota.config.colors.get(&a.id).copied().unwrap_or_default();color_picker(ui,a.provider,&mut color);if color==Accent::Brand{self.quota.config.colors.remove(&a.id);}else{self.quota.config.colors.insert(a.id.clone(),color);}
                 let source=if a.provider==Provider::Gemini{"Gemini 网页订阅 · Windows 加密保存".into()}else if a.provider==Provider::GrokBot{if a.source.as_os_str().is_empty(){"浏览器登录 · Windows 安全存储".into()}else{"Grok Bot 本机登录".into()}}else{a.source.to_string_lossy()};
                 ui.label(egui::RichText::new(source).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
@@ -193,7 +208,9 @@ impl App {
             ui.horizontal(|ui|{if ui.button("识别本机账号").clicked(){self.quota.note=self.quota.config.discover().message();}if ui.add_enabled(self.quota.busy.is_empty(),egui::Button::new("刷新额度")).clicked(){self.pending.push(Cmd::QuotaRefresh);}});
             ui.label(egui::RichText::new("本机识别支持 Codex、Claude 桌面版与 Code、Kimi Code、Grok Bot；Gemini 请连接浏览器。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
         });
-        if let Some(id)=remove{if let Some(account)=self.quota.config.accounts.iter().find(|a|a.id==id){match account.provider{Provider::GrokBot=>{quota::grok::forget(account);self.quota.login=None;},Provider::Gemini=>quota::gemini::forget(account),_=>{}}}self.quota.config.accounts.retain(|a|a.id!=id);self.quota.config.colors.remove(&id);self.quota.rows.remove(&id);self.quota.busy.remove(&id);if self.quota.config.selected==id{self.quota.config.selected=self.quota.config.accounts.first().map(|a|a.id.clone()).unwrap_or_default();}}
+        let removed_account=remove.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|a.id==*id)).cloned();
+        if let Some(id)=remove{self.quota.config.accounts.retain(|a|a.id!=id);self.quota.config.colors.remove(&id);if self.quota.config.selected==id{self.quota.config.selected=self.quota.config.accounts.first().map(|a|a.id.clone()).unwrap_or_default();}}
+        if let Some(id)=rebind{match self.quota.config.confirm_current_login(&id){Ok(())=>{self.quota.rows.remove(&id);self.quota.note="已重新绑定当前登录".into();},Err(error)=>self.quota.note=error}}
         if let Some(alias)=reconnect{self.quota_login(alias);}
         if let Some((alias,slot))=gemini_reconnect{self.quota.gemini_connecting=Some(quota::gemini::Connect::start(alias,String::new(),None,slot));}
         settings_label(ui,"添加其他账号");settings_card(ui,|ui|{
@@ -224,7 +241,11 @@ impl App {
         if self.quota.login.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("等待浏览器登录…");if ui.button("取消登录").clicked(){self.quota.login=None;self.quota.note="登录已取消".into();}});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
         if self.quota.gemini_connecting.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("正在连接 Gemini…");});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
         if !self.quota.note.is_empty(){ui.label(egui::RichText::new(&self.quota.note).size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(190),Color32::from_gray(65))));}
-        if before!=self.quota.config{self.quota.config.save();}
+        if before!=self.quota.config{
+            if self.persist_quota(before){
+                if let Some(account)=removed_account{match account.provider{Provider::GrokBot=>{quota::grok::forget(&account);self.quota.login=None;},Provider::Gemini=>quota::gemini::forget(&account),_=>{}}self.quota.rows.remove(&account.id);self.quota.busy.remove(&account.id);}
+            }else{self.quota.alias=form_before.0;self.quota.source=form_before.1;}
+        }
     }
     fn quota_file_form(&mut self,ui:&mut egui::Ui){
         ui.label("登录 JSON 文件");ui.horizontal(|ui|{ui.add_sized([(ui.available_width()-65.0).max(100.0),27.0],egui::TextEdit::singleline(&mut self.quota.source).vertical_align(egui::Align::Center).hint_text("选择该账号的登录文件"));if ui.button("选择…").clicked(){self.pending.push(Cmd::QuotaChooseFile);}});
@@ -243,6 +264,43 @@ impl App {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    #[test]
+    fn quota_rebind_discards_previous_identity_results(){
+        let old=Account{id:"account".into(),provider:Provider::Codex,alias:"工作".into(),source:"auth.json".into(),slot:Some("cli:identity:first".into()),enabled:true,pinned:true};
+        let mut current=old.clone();current.slot=Some("cli:identity:second".into());
+        let mut state=State::default();state.config.accounts.push(current.clone());state.busy.insert(current.id.clone());
+        state.receive(quota::Event::new(&old,Ok(Snapshot::default())));
+        assert!(state.rows.is_empty());assert!(state.busy.contains(&current.id));
+        state.receive(quota::Event::new(&current,Ok(Snapshot::default())));
+        assert!(state.rows.contains_key(&current.id));assert!(!state.busy.contains(&current.id));
+    }
+    #[test]
+    fn results_for_disabled_or_removed_accounts_clear_busy_without_showing(){
+        let account=Account{id:"account".into(),provider:Provider::Codex,alias:"工作".into(),source:"auth.json".into(),slot:Some("cli:identity:first".into()),enabled:true,pinned:true};
+        let mut state=State::default();state.config.accounts.push(account.clone());
+        state.busy.insert(account.id.clone());state.config.accounts[0].enabled=false;
+        state.receive(quota::Event::new(&account,Ok(Snapshot::default())));
+        assert!(state.busy.is_empty(),"刷新途中停用账号后不能一直显示更新中");assert!(state.rows.is_empty());
+        state.config.accounts[0].enabled=true;state.config.enabled=false;state.busy.insert(account.id.clone());
+        state.receive(quota::Event::new(&account,Ok(Snapshot::default())));
+        assert!(state.busy.is_empty());assert!(state.rows.is_empty());
+        state.config.accounts.clear();state.busy.insert(account.id.clone());
+        state.receive(quota::Event::new(&account,Ok(Snapshot::default())));
+        assert!(state.busy.is_empty());assert!(state.rows.is_empty());
+    }
+    #[test]
+    fn quota_save_failure_preserves_existing_accounts_and_reports_error(){
+        let dir=std::env::temp_dir().join(format!("quota-save-failure-{}",std::process::id()));
+        std::fs::create_dir_all(dir.join("ai-quota.json")).unwrap();
+        let previous_env=std::env::var_os("DAOZAI_DATA_DIR");std::env::set_var("DAOZAI_DATA_DIR",&dir);
+        let mut app=App::new(&egui::Context::default(),Default::default());
+        let before=app.quota.config.clone();app.quota.config.enabled=!before.enabled;
+        assert!(!app.persist_quota(before.clone()));
+        assert_eq!(app.quota.config,before);assert!(app.quota.note.contains("保存失败"));
+        assert!(dir.join("ai-quota.json").is_dir());
+        if let Some(value)=previous_env{std::env::set_var("DAOZAI_DATA_DIR",value);}else{std::env::remove_var("DAOZAI_DATA_DIR");}
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn quota_logo_matches_screen_pixels_at_each_display_scale(){
         for scale in [1.0,1.25,1.5,1.75,2.0] {

@@ -3,6 +3,11 @@ use super::{Account,Item,Parsed,parse_message,body_of,code_of,links_of,meeting_o
 use imap_proto::{BodyStructure,MessageSection,SectionPath};
 use std::io::{Read,Write};
 
+pub(super) struct Fetched {
+    pub item: Item,
+    pub updates: Vec<super::CalendarUpdate>,
+}
+
 fn parts(body:&BodyStructure<'_>,path:&mut Vec<u32>,out:&mut Vec<Vec<u32>>){
     match body {
         BodyStructure::Multipart{bodies,..}=>for (i,body) in bodies.iter().enumerate(){
@@ -19,16 +24,16 @@ fn parts(body:&BodyStructure<'_>,path:&mut Vec<u32>,out:&mut Vec<Vec<u32>>){
     }
 }
 
-fn make_item(parsed:Parsed,fetch:&imap::types::Fetch,account:&Account)->Item{
-    Item {received_unix: fetch.internal_date().map(|d|d.timestamp()), account:account.email.clone(),
+fn make_item(parsed:Parsed,fetch:&imap::types::Fetch,account:&Account)->Fetched{
+    Fetched { updates: super::invites::parse(&parsed.calendar), item: Item {received_unix: fetch.internal_date().map(|d|d.timestamp()), account:account.email.clone(),
         from:if parsed.from.is_empty(){account.email.clone()}else{parsed.from.clone()},
         subject:if parsed.subject.is_empty(){"（无主题）".into()}else{parsed.subject.clone()},
         time:fetch.internal_date().map(|d|d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default(),
-        code:code_of(&parsed),summary:body_of(&parsed).into(),links:links_of(&parsed),meeting:meeting_of(&parsed.calendar),uid:fetch.uid.unwrap_or(0)}
+        code:code_of(&parsed),summary:body_of(&parsed).into(),links:links_of(&parsed),meeting:meeting_of(&parsed.calendar),uid:fetch.uid.unwrap_or(0)}}
 }
 
 // 部分旧服务器没有 BODYSTRUCTURE 或 MIME 分段支持，继续使用原有完整读取路径。
-fn legacy<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)->Result<Option<Item>,()>{
+fn legacy_with_updates<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)->Result<Option<Fetched>,()>{
     let fetched=session.uid_fetch(uid.to_string(),"(UID INTERNALDATE BODY.PEEK[HEADER] BODY.PEEK[TEXT])").map_err(|_|())?;
     let Some(fetch)=fetched.iter().find(|f|f.uid==Some(uid))else{return Ok(None)};
     let mut raw=fetch.header().ok_or(())?.to_vec();raw.extend_from_slice(b"\r\n");
@@ -36,23 +41,23 @@ fn legacy<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)-
     Ok(Some(make_item(parse_message(&raw),fetch,account)))
 }
 
-pub(super) fn item<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)->Result<Option<Item>,()>{
+pub(super) fn item_with_updates<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)->Result<Option<Fetched>,()>{
     let fetched=match session.uid_fetch(uid.to_string(),"(UID INTERNALDATE BODYSTRUCTURE BODY.PEEK[HEADER])"){
-        Ok(fetched)=>fetched,Err(_)=>return legacy(session,uid,account),
+        Ok(fetched)=>fetched,Err(_)=>return legacy_with_updates(session,uid,account),
     };
     let Some(fetch)=fetched.iter().find(|f|f.uid==Some(uid))else{return Ok(None)};
-    let Some(body)=fetch.bodystructure()else{return legacy(session,uid,account)};
+    let Some(body)=fetch.bodystructure()else{return legacy_with_updates(session,uid,account)};
     let mut selected=Vec::new();parts(body,&mut Vec::new(),&mut selected);
     let mut parsed=parse_message(fetch.header().ok_or(())?);
     for path in selected {
         let section=path.iter().map(u32::to_string).collect::<Vec<_>>().join(".");
         let result=session.uid_fetch(uid.to_string(),format!("(UID BODY.PEEK[{section}.MIME] BODY.PEEK[{section}])"));
-        let Ok(part)=result else{return legacy(session,uid,account)};
+        let Ok(part)=result else{return legacy_with_updates(session,uid,account)};
         let data=part.iter().find(|f|f.uid==Some(uid)).and_then(|f|Some((
             f.section(&SectionPath::Part(path.clone(),Some(MessageSection::Mime)))?,
             f.section(&SectionPath::Part(path,None))?,
         )));
-        let Some((header,body))=data else{return legacy(session,uid,account)};
+        let Some((header,body))=data else{return legacy_with_updates(session,uid,account)};
         let mut raw=Vec::with_capacity(header.len()+body.len()+2);raw.extend_from_slice(header);
         if !header.ends_with(b"\r\n\r\n"){raw.extend_from_slice(b"\r\n");}
         raw.extend_from_slice(body);
@@ -62,6 +67,15 @@ pub(super) fn item<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&
     }
     if !parsed.text.trim().is_empty(){parsed.emphasized.clear();}
     Ok(Some(make_item(parsed,fetch,account)))
+}
+
+#[cfg(test)]
+fn item<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)->Result<Option<Item>,()>{
+    item_with_updates(session,uid,account).map(|value| value.map(|value| value.item))
+}
+#[cfg(test)]
+fn legacy<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)->Result<Option<Item>,()>{
+    legacy_with_updates(session,uid,account).map(|value| value.map(|value| value.item))
 }
 
 #[cfg(test)]
@@ -76,14 +90,32 @@ mod tests {
         fn flush(&mut self)->std::io::Result<()>{Ok(())}
     }
     fn run(reply:String)->(Item,String){
+        let (fetched, commands) = run_fetched(reply);
+        (fetched.item, commands)
+    }
+    fn run_fetched(reply:String)->(Fetched,String){
         let output=Arc::new(Mutex::new(Vec::new()));
         let wire=Wire{input:Cursor::new(format!("a1 OK login\r\n{reply}").into_bytes()),output:output.clone()};
         let mut session=imap::Client::new(wire).login("test","test").unwrap();
         let account=Account {custom: None, email:"test@example.com".into(),provider:super::super::Provider::Qq,enabled:true};
-        let item=item(&mut session,42,&account).unwrap().unwrap();
+        let item=item_with_updates(&mut session,42,&account).unwrap().unwrap();
         let commands=String::from_utf8(output.lock().unwrap().clone()).unwrap();(item,commands)
     }
     fn literal(text:&str)->String{format!("{{{}}}\r\n{text}",text.len())}
+    #[test]
+    fn cancelled_calendar_part_preserves_revision_even_without_active_meeting(){
+        let header="From: owner@example.com\r\nSubject: Cancelled\r\nContent-Type: text/calendar\r\n\r\n";
+        let calendar="BEGIN:VCALENDAR\nMETHOD:CANCEL\nBEGIN:VEVENT\nUID:cancelled-1\nSEQUENCE:2\nORGANIZER:mailto:owner@example.com\nEND:VEVENT\nEND:VCALENDAR";
+        let mime="Content-Type: text/calendar; charset=utf-8\r\n\r\n";
+        let structure=r#"("TEXT" "CALENDAR" ("CHARSET" "UTF-8") NIL NIL "7BIT" 200 8)"#;
+        let reply=format!("* 1 FETCH (UID 42 BODYSTRUCTURE {structure} BODY[HEADER] {})\r\na2 OK fetch\r\n* 1 FETCH (UID 42 BODY[1.MIME] {} BODY[1] {})\r\na3 OK fetch\r\n",literal(header),literal(mime),literal(calendar));
+        let (fetched, _) = run_fetched(reply);
+        assert!(fetched.item.meeting.is_none());
+        assert_eq!(fetched.updates.len(), 1);
+        assert_eq!(fetched.updates[0].uid, "cancelled-1");
+        assert_eq!(fetched.updates[0].sequence, 2);
+        assert!(fetched.updates[0].meeting.is_none());
+    }
     #[test]
     fn qq_empty_body_structure_accepts_nil_transfer_encoding(){
         let response=b"* 1 FETCH (UID 42 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL NIL 0 0 NIL NIL NIL))\r\n";

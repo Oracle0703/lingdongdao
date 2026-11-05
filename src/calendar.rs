@@ -13,7 +13,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 use chrono::{Datelike, NaiveDate};
 
-pub const SERVICE: &str = "Daozai.Calendar";
+pub const SERVICE: &str = concat!(crate::app_id!(), ".Calendar");
 /// 开启自动同步时每 5 分钟更新一次。
 const SYNC_SECS: u64 = 300;
 /// 只取未来 24 小时。
@@ -959,9 +959,16 @@ mod tests {
                 let mut paths=Vec::new();
                 while stop_rx.try_recv().is_err() {
                     let Ok((mut stream,_))=listener.accept() else {std::thread::sleep(Duration::from_millis(5));continue;};
+                    // Windows 上 accept 得到的连接会继承监听端的非阻塞模式，负载高时读取会返回 WouldBlock。
+                    stream.set_nonblocking(false).unwrap();
                     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                     let mut request=String::new();
-                    while !request.contains("\r\n\r\n") {
+                    // 读完 PROPFIND 请求体再回应：Windows 关闭仍有未读数据的连接会发 RST，客户端可能读不到响应。
+                    let complete=|request:&str|request.find("\r\n\r\n").is_some_and(|head|{
+                        let length=request[..head].lines().find_map(|line|line.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v|v.trim().parse::<usize>().ok())).unwrap_or(0);
+                        request.len()>=head+4+length
+                    });
+                    while !complete(&request) {
                         let mut buf=[0;4096];let n=stream.read(&mut buf).unwrap();if n==0{break;}
                         request.push_str(&String::from_utf8_lossy(&buf[..n]));
                     }

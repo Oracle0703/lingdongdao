@@ -1,11 +1,12 @@
-﻿//! 持久化与状态模型。
+//! 持久化与状态模型。
 //!
-//! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
-//! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
-//!   %APPDATA%\Daozai\settings.txt   -> pet=0/1, minimal=0/1
-//!   %APPDATA%\Daozai\todo.txt
-//!   %APPDATA%\Daozai\water.txt      -> bottle=<ml> / goal=<ml> / start=YYYY-MM-DD
-//!   %APPDATA%\Daozai\shelf.txt      -> 置物清单（每行一个绝对路径）
+//! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），默认目录为
+//! `%APPDATA%\<APP_ID>`（见 `brand.rs`），避免与原版岛仔的 `%APPDATA%\Daozai` 互相覆盖：
+//!   %APPDATA%\<APP_ID>\settings.txt   -> pet=0/1, minimal=0/1
+//!   %APPDATA%\<APP_ID>\todo.txt
+//!   %APPDATA%\<APP_ID>\water.txt      -> bottle=<ml> / goal=<ml> / start=YYYY-MM-DD
+//!   %APPDATA%\<APP_ID>\shelf.txt      -> 置物清单（每行一个绝对路径）
+//!   %APPDATA%\<APP_ID>\llm.txt        -> 自建大模型的地址与模型（API Key 在凭据管理器）
 //!
 //! 设置环境变量 `DAOZAI_DATA_DIR` 可把以上目录整体改到别处（用于与已安装的
 //! 原工具并存、或跑测试时不碰真实数据）。
@@ -21,22 +22,39 @@ pub fn config_dir() -> PathBuf {
     if let Ok(root) = std::env::var("DAOZAI_DATA_DIR") {
         return PathBuf::from(root);
     }
-    env_dir("APPDATA").join("Daozai")
+    env_dir("APPDATA").join(crate::brand::APP_ID)
 }
 
-fn read_kv(path: &Path) -> Vec<(String, String)> {
+pub(crate) fn read_kv(path: &Path) -> Vec<(String, String)> {
+    read_kv_checked(path).unwrap_or_default()
+}
+
+fn read_optional(path:&Path)->Result<Option<String>,String> {
+    match fs::read_to_string(path) {
+        Ok(text)=>Ok(Some(text)),
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),
+        Err(error)=>Err(format!("无法读取 {}：{error}",path.display())),
+    }
+}
+
+fn read_kv_checked(path:&Path)->Result<Vec<(String,String)>,String> {
     let mut out = Vec::new();
-    if let Ok(text) = fs::read_to_string(path) {
+    if let Some(text) = read_optional(path)? {
         for line in text.trim_start_matches('\u{feff}').lines() {
             if let Some((k, v)) = line.split_once('=') {
                 out.push((k.trim().to_string(), v.trim().to_string()));
             }
         }
     }
-    out
+    Ok(out)
 }
 
-fn write_kv(path: &Path, pairs: &[(String, String)]) -> std::io::Result<()> {
+fn ensure_loaded(error:&Option<String>)->std::io::Result<()> {
+    if let Some(error)=error {return Err(std::io::Error::other(format!("{error}；为保护原数据已禁止保存，请修复后重新加载")));}
+    Ok(())
+}
+
+pub(crate) fn write_kv(path: &Path, pairs: &[(String, String)]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -85,6 +103,7 @@ fn replace_file(tmp:&Path,path:&Path)->std::io::Result<()> {
 
 #[derive(Clone, Debug)]
 pub struct Settings {
+    pub load_error: Option<String>,
     pub display_id: String,
     pub settings_theme: crate::settings_theme::SettingsTheme,
     pub pet: bool,
@@ -129,7 +148,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
@@ -149,7 +168,8 @@ impl Settings {
 
     pub fn load() -> Self {
         let mut s = Self::default();
-        for (k, v) in read_kv(&config_dir().join("settings.txt")) {
+        let values=match read_kv_checked(&config_dir().join("settings.txt")){Ok(values)=>values,Err(error)=>{s.load_error=Some(error);return s;}};
+        for (k, v) in values {
             match k.as_str() {
                 "settings_theme" => s.settings_theme=crate::settings_theme::SettingsTheme::parse(&v),
                 "display_id" => s.display_id = v,
@@ -207,8 +227,9 @@ impl Settings {
         s
     }
 
-    pub fn save(&self) {
-        let _ = write_kv(
+    pub fn save(&self) -> std::io::Result<()> {
+        ensure_loaded(&self.load_error)?;
+        write_kv(
             &config_dir().join("settings.txt"),
             &[
                 ("display_id".into(),self.display_id.clone()),
@@ -249,7 +270,7 @@ impl Settings {
                 ("calendar_prompt".into(), (self.calendar_prompt as u8).to_string()),
                 ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
             ],
-        );
+        )
     }
 }
 
@@ -264,13 +285,23 @@ pub struct TodoItem {
 #[derive(Clone, Debug, Default)]
 pub struct TodoList {
     pub items: Vec<TodoItem>,
+    pub load_error: Option<String>,
 }
 
 impl TodoList {
     pub fn load() -> Self {
         let path = config_dir().join("todo.txt");
         let mut list = Self::default();
-        if let Ok(text) = fs::read_to_string(path) {
+        let loaded=match read_optional(&path){Ok(loaded)=>loaded,Err(error)=>{list.load_error=Some(error);return list;}};
+        if let Some(text) = loaded {
+            let text=text.trim_start_matches('\u{feff}');
+            if text.trim_start().starts_with(['{','[']) {
+                match Self::parse_json(text) {
+                    Ok(items)=>list.items=items,
+                    Err(error)=>list.load_error=Some(format!("待办文件无法完整读取：{error}")),
+                }
+                return list;
+            }
             for line in text.lines() {
                 if line.trim().is_empty() {
                     continue;
@@ -283,13 +314,19 @@ impl TodoList {
                 let mut parts = line.splitn(3, '|');
                 let flag = parts.next().unwrap_or("o");
                 let when = parts.next().unwrap_or("-");
+                if !matches!(flag, "o" | "x") || (when != "-" && chrono::NaiveDate::parse_from_str(when, "%Y-%m-%d").is_err()) {
+                    list.items.push(TodoItem { text: line.to_owned(), done_on: None, due: None, reminded: false });
+                    continue;
+                }
                 let raw = parts.next().unwrap_or("").trim();
-                let (due, reminded, text) = if let Some(rest) = raw.strip_prefix("@due:") {
+                let legacy_due = raw.strip_prefix("@due:").and_then(|rest| {
                     let mut fields = rest.splitn(3, '|');
-                    let due = fields.next().unwrap_or("").to_string();
-                    let reminded = fields.next() == Some("1");
-                    (Some(due), reminded, fields.next().unwrap_or("").to_string())
-                } else { (None, false, raw.to_string()) };
+                    let due = fields.next()?;
+                    chrono::NaiveDateTime::parse_from_str(due, "%Y-%m-%d %H:%M").ok()?;
+                    let reminded = match fields.next()? { "0" => false, "1" => true, _ => return None };
+                    Some((Some(due.to_owned()), reminded, fields.next()?.to_owned()))
+                });
+                let (due, reminded, text) = legacy_due.unwrap_or_else(|| (None, false, raw.to_string()));
                 if text.is_empty() {
                     continue;
                 }
@@ -306,24 +343,31 @@ impl TodoList {
         list
     }
 
-    pub fn save(&self) {
-        let body: String = self
-            .items
-            .iter()
-            .map(|i| {
-                let state = i.done_on.as_ref().map(|d| format!("x|{d}")).unwrap_or_else(|| "o|-".into());
-                let text = i.text.replace(['\n', '\r'], " ");
-                match &i.due {
-                    Some(due) => format!("{state}|@due:{due}|{}|{text}\n", i.reminded as u8),
-                    None => format!("{state}|{text}\n"),
-                }
-            })
-            .collect();
+    fn parse_json(text:&str)->Result<Vec<TodoItem>,String> {
+        let json:serde_json::Value=serde_json::from_str(text).map_err(|e|e.to_string())?;
+        if json["version"]!=1 {return Err("不支持的待办文件版本".into());}
+        let items=json["items"].as_array().ok_or("待办 items 必须是数组")?;
+        let optional_string=|item:&serde_json::Value,key:&str|->Result<Option<String>,String>{
+            match item.get(key) {Some(serde_json::Value::Null)=>Ok(None),Some(serde_json::Value::String(value))=>Ok(Some(value.clone())),_=>Err(format!("待办 {key} 字段无效"))}
+        };
+        items.iter().map(|item|Ok(TodoItem {
+            text:item["text"].as_str().ok_or("待办 text 字段无效")?.to_owned(),
+            done_on:optional_string(item,"done_on")?,due:optional_string(item,"due")?,
+            reminded:item["reminded"].as_bool().ok_or("待办 reminded 字段无效")?,
+        })).collect()
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        ensure_loaded(&self.load_error)?;
+        let items: Vec<_> = self.items.iter().map(|item| serde_json::json!({
+            "text": item.text, "done_on": item.done_on, "due": item.due, "reminded": item.reminded
+        })).collect();
+        let body = serde_json::to_vec(&serde_json::json!({"version": 1, "items": items}))?;
         let path = config_dir().join("todo.txt");
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)?;
         }
-        let _ = atomic_write(&path, body.as_bytes());
+        atomic_write(&path, &body)
     }
 
     pub fn done_today(&self, today: &str) -> usize {
@@ -336,6 +380,7 @@ impl TodoList {
 
 #[derive(Clone, Debug)]
 pub struct Water {
+    pub load_error: Option<String>,
     pub bottle_ml: u32,
     pub goal_ml: u32,
     pub start_day: String,
@@ -349,24 +394,27 @@ pub struct Water {
 
 impl Default for Water {
     fn default() -> Self {
-        Self { bottle_ml: 2000, goal_ml: 2000, start_day: String::new(), drunk_ml: 0, refills: 0, hours: [0; 24], remind: true }
+        Self { load_error: None, bottle_ml: 2000, goal_ml: 2000, start_day: String::new(), drunk_ml: 0, refills: 0, hours: [0; 24], remind: true }
     }
 }
 
 impl Water {
-    /// `water.txt` 只写原工具已知的三个键；复刻版新增的进度键写到 `water-extra.txt`，
-    /// 避免给原工具的文件引入未知键。
+    /// Read the previous two-file format; new saves atomically publish all state
+    /// in water.txt with format=2, so a failed save cannot split day and progress.
     pub fn load(today: &str) -> Self {
         let mut w = Self::default();
-        for (k, v) in read_kv(&config_dir().join("water.txt")) {
+        let main = match read_kv_checked(&config_dir().join("water.txt")){Ok(values)=>values,Err(error)=>{w.load_error=Some(error);w.start_day=today.into();return w;}};
+        let unified = main.iter().any(|(k,v)| k == "format" && v == "2");
+        for (k, v) in &main {
             match k.as_str() {
                 "bottle" => w.bottle_ml = v.parse::<f32>().map(|x| x as u32).unwrap_or(2000),
                 "goal" => w.goal_ml = v.parse().unwrap_or(2000),
-                "start" => w.start_day = v,
+                "start" => w.start_day = v.clone(),
                 _ => {}
             }
         }
-        for (k, v) in read_kv(&config_dir().join("water-extra.txt")) {
+        let progress = if unified { main } else { match read_kv_checked(&config_dir().join("water-extra.txt")){Ok(values)=>values,Err(error)=>{w.load_error=Some(error);w.start_day=today.into();return w;}} };
+        for (k, v) in progress {
             match k.as_str() {
                 "drunk" => w.drunk_ml = v.parse().unwrap_or(0),
                 "refills" => w.refills = v.parse().unwrap_or(0),
@@ -387,23 +435,20 @@ impl Water {
             w.drunk_ml = 0;
             w.refills = 0;
             w.hours = [0; 24];
-            w.save();
         }
         w
     }
 
-    pub fn save(&self) {
-        let _ = write_kv(
+    pub fn save(&self) -> std::io::Result<()> {
+        ensure_loaded(&self.load_error)?;
+        // A single atomic replacement keeps the day, goal and progress consistent.
+        write_kv(
             &config_dir().join("water.txt"),
             &[
+                ("format".into(), "2".into()),
                 ("bottle".into(), self.bottle_ml.to_string()),
                 ("goal".into(), self.goal_ml.to_string()),
                 ("start".into(), self.start_day.clone()),
-            ],
-        );
-        let _ = write_kv(
-            &config_dir().join("water-extra.txt"),
-            &[
                 ("drunk".into(), self.drunk_ml.to_string()),
                 ("refills".into(), self.refills.to_string()),
                 ("remind".into(), if self.remind { "1".into() } else { "0".into() }),
@@ -412,16 +457,18 @@ impl Water {
                     self.hours.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(","),
                 ),
             ],
-        );
+        )
     }
 
     /// 喝一口：计入总量与当前小时。
-    pub fn drink(&mut self, ml: u32, hour: usize) {
+    pub fn drink(&mut self, ml: u32, hour: usize) -> std::io::Result<()> {
+        let previous = self.clone();
         let total=self.drunk_ml.saturating_add(ml).min(self.goal_ml.max(ml).saturating_mul(4));
         let added=total.saturating_sub(self.drunk_ml);
         self.drunk_ml=total;
         self.hours[hour.min(23)]=self.hours[hour.min(23)].saturating_add(added);
-        self.save();
+        if let Err(error) = self.save() { *self = previous; return Err(error); }
+        Ok(())
     }
 
     pub fn percent(&self) -> f32 {
@@ -436,12 +483,14 @@ impl Water {
 #[derive(Clone, Debug, Default)]
 pub struct Shelf {
     pub items: Vec<PathBuf>,
+    pub load_error: Option<String>,
 }
 
 impl Shelf {
     pub fn load() -> Self {
         let mut s = Self::default();
-        if let Ok(text) = fs::read_to_string(config_dir().join("shelf.txt")) {
+        let loaded=match read_optional(&config_dir().join("shelf.txt")){Ok(loaded)=>loaded,Err(error)=>{s.load_error=Some(error);return s;}};
+        if let Some(text) = loaded {
             for line in text.lines() {
                 let p = PathBuf::from(line.trim());
                 if !line.trim().is_empty() && !s.items.contains(&p) {
@@ -452,7 +501,8 @@ impl Shelf {
         s
     }
 
-    pub fn save(&self) {
+    pub fn save(&self) -> std::io::Result<()> {
+        ensure_loaded(&self.load_error)?;
         let body: String = self
             .items
             .iter()
@@ -460,9 +510,9 @@ impl Shelf {
             .collect();
         let path = config_dir().join("shelf.txt");
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)?;
         }
-        let _ = atomic_write(&path, body.as_bytes());
+        atomic_write(&path, body.as_bytes())
     }
 
     /// 原工具的做法：记录文件所在位置，不复制文件本体（官网说明
@@ -471,19 +521,22 @@ impl Shelf {
         if !src.exists() { return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "文件不存在")); }
         if !self.items.iter().any(|p| p == src) {
             self.items.push(src.to_path_buf());
-            self.save();
+            if let Err(error) = self.save() { self.items.pop(); return Err(error); }
         }
         Ok(())
     }
 
-    pub fn remove(&mut self, p: &Path) {
+    pub fn remove(&mut self, p: &Path) -> std::io::Result<()> {
+        let previous = self.items.clone();
         self.items.retain(|item| item != p);
-        self.save();
+        if let Err(error) = self.save() { self.items = previous; return Err(error); }
+        Ok(())
     }
 
-    pub fn clear(&mut self) {
-        self.items.clear();
-        self.save();
+    pub fn clear(&mut self) -> std::io::Result<()> {
+        let previous = std::mem::take(&mut self.items);
+        if let Err(error) = self.save() { self.items = previous; return Err(error); }
+        Ok(())
     }
 }
 
@@ -566,21 +619,25 @@ mod tests {
 
 /// 仅保存应用标识与开关，不保存通知内容。
 #[derive(Clone,Debug,Default)]
-pub struct NotificationApps {pub items:Vec<(String,String,bool)>}
+pub struct NotificationApps {pub items:Vec<(String,String,bool)>,pub load_error:Option<String>}
 impl NotificationApps {
     pub fn load()->Self {
         let path=config_dir().join("notification-apps.json");
-        let Ok(raw)=fs::read(path) else{return Self::default()};
-        let Ok(json)=serde_json::from_slice::<serde_json::Value>(&raw) else{return Self::default()};
-        let items=json.as_array().into_iter().flatten().filter_map(|a|Some((a.get("id")?.as_str()?.to_owned(),a.get("name")?.as_str()?.to_owned(),a.get("enabled")?.as_bool()?))).collect();Self{items}
+        let raw=match read_optional(&path){Ok(Some(raw))=>raw,Ok(None)=>return Self::default(),Err(error)=>return Self{load_error:Some(error),..Self::default()}};
+        let parsed=(||->Result<Vec<(String,String,bool)>,String>{
+            let json:serde_json::Value=serde_json::from_str(&raw).map_err(|e|e.to_string())?;
+            json.as_array().ok_or("通知应用文件必须为数组")?.iter().map(|a|Ok((a["id"].as_str().ok_or("应用标识无效")?.to_owned(),a["name"].as_str().ok_or("应用名称无效")?.to_owned(),a["enabled"].as_bool().ok_or("应用开关无效")?))).collect()
+        })();
+        match parsed{Ok(items)=>Self{items,load_error:None},Err(error)=>Self{load_error:Some(error),..Self::default()}}
     }
-    pub fn save(&self){
+    pub fn save(&self)->std::io::Result<()>{
+        ensure_loaded(&self.load_error)?;
         let list:Vec<_>=self.items.iter().map(|(id,name,enabled)|serde_json::json!({"id":id,"name":name,"enabled":enabled})).collect();
-        let path=config_dir().join("notification-apps.json");if let Some(parent)=path.parent(){let _=fs::create_dir_all(parent);}if let Ok(data)=serde_json::to_vec(&list){let _=atomic_write(&path,&data);}
+        let path=config_dir().join("notification-apps.json");if let Some(parent)=path.parent(){fs::create_dir_all(parent)?;}let data=serde_json::to_vec(&list)?;atomic_write(&path,&data)
     }
-    pub fn observe(&mut self,id:&str,name:&str)->bool{
-        if let Some(item)=self.items.iter().find(|a|a.0==id){return item.2;}
+    pub fn observe(&mut self,id:&str,name:&str)->std::io::Result<bool>{
+        if let Some(item)=self.items.iter().find(|a|a.0==id){return Ok(item.2);}
         let enabled=true;
-        self.items.push((id.to_string(),name.to_string(),enabled));self.save();enabled
+        self.items.push((id.to_string(),name.to_string(),enabled));if let Err(error)=self.save(){self.items.pop();return Err(error);}Ok(enabled)
     }
 }

@@ -55,6 +55,10 @@ const CLOSE: (f32, f32) = (620.0, 1.0);
 const SWELL_K: (f32, f32) = (420.0, 0.8);
 const PAGE_SLIDE: f32 = 46.0;
 
+#[cfg(test)]
+#[path = "app_mail_tests.rs"]
+mod mail_regressions;
+
 pub struct Options {
     /// 是否联网查歌词（录制/测试时关掉）。
     pub fetch_lyrics: bool,
@@ -193,6 +197,7 @@ pub(crate) struct LyricsState {
 #[derive(Default)]
 pub(crate) struct MailState {
     pub privacy:crate::mail_privacy::Privacy,
+    pub invitations: mail::invites::Invitations,
     pub accounts: Vec<mail::Account>,
     /// 每个账号的连接状态，键是邮箱小写。
     pub status: HashMap<String, mail::Status>,
@@ -419,6 +424,7 @@ pub struct App {
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
     pub(crate) updates: crate::updates::State,
+    pub(crate) llm: crate::llm_ui::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
 }
@@ -514,6 +520,7 @@ impl App {
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             updates: Default::default(),
+            llm: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
     }
@@ -551,18 +558,35 @@ impl App {
     pub fn mail_event(&mut self, ev: mail::Event) {
         let watching=|email:&str|self.settings.mail_enabled && self.mail.accounts.iter().any(|a|a.enabled && a.email.eq_ignore_ascii_case(email));
         match ev {
+            mail::Event::MailboxReset { account } => {
+                if !watching(&account) {return;}
+                self.mail.recent.retain(|item| !item.account.eq_ignore_ascii_case(&account));
+                self.mail.invitations.reset(&account);
+                if self.mail.open_uid.as_ref().is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(&account)) {self.mail.open_uid = None;}
+                if self.mail.reading.as_ref().is_some_and(|item| item.account.eq_ignore_ascii_case(&account)) {self.mail.reading = None;}
+                self.mail.privacy.retain(&self.mail.recent);
+                self.clear_stale_mail_alerts();
+            }
             mail::Event::Status { account, status } => {
                 if !watching(&account){return;}
                 self.mail.status.insert(account.to_ascii_lowercase(), status);
             }
-            mail::Event::Mail { item, new } => {
+            mail::Event::Mail { mut item, new, updates } => {
                 if !watching(&item.account){return;}
+                if !updates.is_empty() {
+                    self.mail.invitations.observe(&item.account, item.uid, updates);
+                    for item in &mut self.mail.recent {self.mail.invitations.reconcile(item);}
+                    if let Some(item) = &mut self.mail.reading {self.mail.invitations.reconcile(item);}
+                    self.clear_stale_mail_alerts();
+                }
+                self.mail.invitations.reconcile(&mut item);
                 self.mail.privacy.observe(&item,new,self.t,chrono::Utc::now().timestamp());
                 self.mail
                     .recent
                     .retain(|m| !(m.account.eq_ignore_ascii_case(&item.account) && m.uid == item.uid));
                 self.mail.recent.insert(0, item);
                 self.mail.recent.truncate(60);
+                self.mail.invitations.retain(&self.mail.recent);
                 self.mail.privacy.retain(&self.mail.recent);
                 if new && self.settings.mail_enabled {
                     let item=&self.mail.recent[0];
@@ -589,6 +613,14 @@ impl App {
                 });
             }
         }
+    }
+
+    fn clear_stale_mail_alerts(&mut self) {
+        let stale = |alert: &Alert| alert.meeting.as_ref().is_some_and(|(event, source)|
+            source == "邮件邀请" && !self.mail.recent.iter().any(|item| item.meeting.as_ref() == Some(event)));
+        self.alerts.retain(|alert| !stale(alert));
+        if self.notice.as_ref().is_some_and(stale) {self.notice = None;}
+        if self.hud_notice.as_ref().is_some_and(stale) {self.hud_notice = None;}
     }
 
     /// 设置窗口第 8 个标签页：邮件。
@@ -1088,10 +1120,24 @@ impl App {
         (width,height)
     }
     pub fn set_pet(&mut self,enabled:bool) {
-        self.settings.pet=enabled;if enabled {self.settings.minimal=false;}self.settings.save();
+        let previous=self.settings.clone();
+        self.settings.pet=enabled;if enabled {self.settings.minimal=false;}self.persist_settings(previous);
     }
     pub fn set_minimal(&mut self,enabled:bool) {
-        self.settings.minimal=enabled;if enabled {self.settings.pet=false;}self.settings.save();
+        let previous=self.settings.clone();
+        self.settings.minimal=enabled;if enabled {self.settings.pet=false;}self.persist_settings(previous);
+    }
+    pub(crate) fn persist_settings(&mut self, previous:model::Settings)->bool {
+        if let Err(error)=self.settings.save(){self.settings=previous;self.show_lyrics=self.settings.lyrics_enabled;self.say(format!("设置保存失败，已恢复原值：{error}"));false}else{true}
+    }
+    pub(crate) fn persist_todos(&mut self, previous:model::TodoList)->bool {
+        if let Err(error)=self.todos.save(){self.todos=previous;self.say(format!("待办保存失败，请重试：{error}"));false}else{true}
+    }
+    pub(crate) fn persist_water(&mut self, previous:model::Water)->bool {
+        if let Err(error)=self.water.save(){self.water=previous;self.say(format!("饮水记录保存失败，已恢复原值：{error}"));false}else{true}
+    }
+    pub(crate) fn persist_notification_apps(&mut self, previous:model::NotificationApps)->bool {
+        if let Err(error)=self.notification_apps.save(){self.notification_apps=previous;self.say(format!("通知设置保存失败，已恢复原值：{error}"));false}else{true}
     }
     fn base_size(&self) -> (f32, f32) {
         if !self.compact_notices()&&!self.open {
@@ -1151,6 +1197,10 @@ impl App {
             self.last_reminder = env.t;
             self.page_t0 = env.t - 10.0;
             if self.page==CALENDAR_PAGE {self.request_calendar_month(false);}
+            let load_error=[&self.settings.load_error,&self.todos.load_error,&self.shelf.load_error,&self.notification_apps.load_error].into_iter().find_map(|error|error.clone());
+            if let Some(error)=load_error {
+                self.say(format!("数据读取失败，已禁止覆盖保存：{error}"));
+            }
         }
         let mut cmds = Vec::new();
 
@@ -1769,6 +1819,7 @@ impl App {
         if env.today != self.today {
             self.today = env.today.clone();
             self.water = model::Water::load(&env.today);
+            if let Some(error)=&self.water.load_error {self.say(format!("饮水数据读取失败，已禁止覆盖保存：{error}"));}
             self.last_drink=None;self.last_reminder=self.t;
             self.water_ml = self.water.drunk_ml as f32;
             self.water_ring.snap(self.water.percent() / 100.0);
@@ -1800,7 +1851,13 @@ impl App {
         }
         let now = format!("{} {}", env.today, env.clock.get(..5).unwrap_or("00:00"));
         let due: Vec<_> = self.todos.items.iter().enumerate().filter(|(_, item)| item.done_on.is_none() && !item.reminded && item.due.as_ref().is_some_and(|d| d <= &now)).map(|(i,item)| (i,item.text.clone())).collect();
-        for (i,text) in due { self.todos.items[i].reminded = true; self.todos.save(); self.alert("待办到时间了", text, 4, true); }
+        if !due.is_empty() {
+            for (i,_) in &due { self.todos.items[*i].reminded = true; }
+            let saved=self.todos.save();
+            for (_,text) in due { self.alert("待办到时间了", text, 4, true); }
+            // Keep the in-process marker to avoid firing every frame when the disk is full.
+            if let Err(error)=saved { self.say(format!("提醒记录保存失败，下次启动可能再次提醒：{error}")); }
+        }
         // v0.5.5 会议提醒：.ics 里的开始时间，默认提前 15 分钟（可设 5/15/30）。
         // v0.5.6 起日历（CalDAV）事件走同一套：同一场会（UID + DTSTART）只提醒一次，
         // 邮件和日历两条来源撞上了也只弹一次。
@@ -1959,9 +2016,9 @@ impl App {
         if self.page != 3 {
             self.go(3, 1.0);
         }
-        let (mut added,mut duplicate,mut failed) = (0,0,0);
+        let (mut added,mut duplicate,mut failed,mut missing) = (0,0,0,0);
         for p in files {
-            if !p.exists() {failed+=1;continue;}
+            if !p.exists() {failed+=1;missing+=1;continue;}
             if self.shelf.items.contains(&p) {
                 duplicate+=1;
                 continue;
@@ -1973,7 +2030,7 @@ impl App {
         }
         let message=if added==0 && failed==0 {
             if duplicate==1{"该文件已在置物架中".into()}else{"这些文件已在置物架中".into()}
-        }else if added==0 && duplicate==0 {"文件不存在或无法访问".into()}
+        }else if added==0 && duplicate==0 {if missing==failed{"文件不存在或无法访问".into()}else{"置物架保存失败，请检查数据目录".into()}}
         else {
             let mut parts=Vec::new();
             if added>0{parts.push(format!("已添加 {added} 个文件"));}
@@ -2018,15 +2075,16 @@ impl App {
         if submit {
             let text = self.buf.trim().to_string();
             let mut added=false;
+            let previous=self.todos.clone();
             if let Some(i) = self.editing {
                 if !text.is_empty() && i < self.todos.items.len() {
                     self.todos.items[i].text = text;
-                    self.todos.save();
+                    if !self.persist_todos(previous) {resp.request_focus();return;}
                 }
             } else if !text.is_empty() {
                 self.todo_first = 0;
                 self.todos.items.insert(0, model::TodoItem { text, done_on: None, due: None, reminded: false });
-                self.todos.save();
+                if !self.persist_todos(previous) {resp.request_focus();return;}
                 self.todo_pop.vel += 6.0;
                 added=true;
             }

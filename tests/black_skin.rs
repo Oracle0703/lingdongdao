@@ -9,7 +9,7 @@ fn legacy_material_settings_are_retired() {
         std::fs::write(path.join("settings.txt"), format!("material={skin}\npet=0\n")).unwrap();
         let settings = Settings::load();
         assert!(!settings.pet);
-        settings.save();
+        settings.save().unwrap();
         let saved = std::fs::read_to_string(path.join("settings.txt")).unwrap();
         assert!(!saved.contains("material="));
         assert!(saved.contains("pet=0"));

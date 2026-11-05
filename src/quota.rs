@@ -37,25 +37,34 @@ impl Accent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {pub id:String, pub provider:Provider, pub alias:String, pub source:PathBuf, pub slot:Option<String>, pub enabled:bool, pub pinned:bool}
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>}
-impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new()}}}
+pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>,pub load_error:Option<String>}
+impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new(),load_error:None}}}
 impl Config {
     pub fn load()->Self {
         let path=crate::model::config_dir().join("ai-quota.json");
-        let Ok(raw)=fs::read(&path) else {return Self::default();};
-        serde_json::from_slice(&raw).ok().map(|v|Self::from_json(&v)).unwrap_or_default()
+        let result=(||{
+            let raw=match fs::read(&path){Ok(raw)=>raw,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(Self::default()),Err(error)=>return Err(error.to_string())};
+            let value:Value=serde_json::from_slice(&raw).map_err(|error|error.to_string())?;
+            if !value.is_object() || value.get("accounts").is_some_and(|accounts|!accounts.is_array()){return Err("额度设置格式无效".into());}
+            let config=Self::from_json(&value);
+            if value["accounts"].as_array().is_some_and(|rows|rows.len()!=config.accounts.len()){return Err("额度账号字段无效".into());}
+            Ok(config)
+        })();
+        result.unwrap_or_else(|error:String|Self{enabled:false,load_error:Some(format!("读取额度设置失败：{error}。请恢复文件并重新启动后再保存")),..Default::default()})
     }
     fn from_json(v:&Value)->Self {
         let accounts=v["accounts"].as_array().into_iter().flatten().filter_map(|a|Some(Account{
             id:a["id"].as_str()?.into(),provider:Provider::parse(a["provider"].as_str()?)?,alias:a["alias"].as_str()?.into(),source:PathBuf::from(a["source"].as_str()?),slot:a["slot"].as_str().map(str::to_owned),enabled:a["enabled"].as_bool().unwrap_or(true),pinned:a["pinned"].as_bool().unwrap_or(false)
         })).collect();
         let colors=v["colors"].as_object().into_iter().flatten().filter_map(|(id,value)|{let color=Accent::parse(value.as_str()?);(color!=Accent::Brand).then(||(id.clone(),color))}).collect();
-        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors}
+        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors,load_error:None}
     }
     fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
-    pub fn save(&self) {
-        let dir=crate::model::config_dir();let _=fs::create_dir_all(&dir);
-        if let Ok(raw)=serde_json::to_vec_pretty(&self.json()){let _=crate::model::atomic_write(&dir.join("ai-quota.json"),&raw);}
+    pub fn save(&self) -> std::io::Result<()> {
+        if let Some(error)=&self.load_error{return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,error.clone()));}
+        let dir=crate::model::config_dir();fs::create_dir_all(&dir)?;
+        let raw=serde_json::to_vec_pretty(&self.json())?;
+        crate::model::atomic_write(&dir.join("ai-quota.json"),&raw)
     }
     pub fn add(&mut self,provider:Provider,alias:String,source:PathBuf)->Result<(),String>{
         if provider==Provider::Gemini{return Err("请使用浏览器或 Cookie 连接 Gemini 网页账号".into());}
@@ -70,7 +79,17 @@ impl Config {
         let alias=if alias.trim().is_empty(){format!("{} · 账号 {}",provider.name(),next)}else{alias.trim().to_owned()};
         let id=format!("{}-{}",provider.name(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
         let pinned=self.accounts.is_empty();if pinned{self.selected=id.clone();}
-        self.accounts.push(Account{id,provider,alias,source:path,slot:None,enabled:true,pinned});Ok(())
+        self.accounts.push(Account{id,provider,alias,source:path,slot:Some(login_binding(&auth)),enabled:true,pinned});Ok(())
+    }
+    /// 仅在用户明确点击重新绑定时接受文件中的新身份；自动识别和轮询不能改绑旧别名。
+    pub fn confirm_current_login(&mut self,id:&str)->Result<(),String>{
+        let index=self.accounts.iter().position(|a|a.id==id).ok_or("账号不存在")?;
+        let account=&self.accounts[index];
+        if !account.references_cli(){return Err("此账号请使用对应的重新登录入口".into());}
+        let auth=credentials(account.provider,&account.source)?;
+        if self.accounts.iter().enumerate().any(|(i,a)|i!=index && a.provider==account.provider && account_credentials(a).is_ok_and(|old|same_login(&old,&auth))){return Err("当前登录已绑定到另一个账号条目".into());}
+        self.accounts[index].slot=Some(login_binding(&auth));
+        Ok(())
     }
     pub(crate) fn connect_grok(&mut self,slot:String,alias:String){
         if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::GrokBot && a.slot.as_deref()==Some(&slot)){
@@ -115,7 +134,7 @@ impl Config {
         for (provider,key,file) in [(Provider::Codex,"CODEX_HOME","auth.json"),(Provider::Claude,"CLAUDE_CONFIG_DIR",".credentials.json")]{
             if let Some(dir)=std::env::var_os(key).filter(|s|!s.is_empty()){candidates.push((provider,PathBuf::from(dir).join(file)));}
         }
-        candidates.extend(self.accounts.iter().filter(|a|matches!(a.provider,Provider::Codex|Provider::Kimi)||(a.provider==Provider::Claude&&a.slot.is_none())).map(|a|(a.provider,a.source.clone())));
+        candidates.extend(self.accounts.iter().filter(|a|a.references_cli()).map(|a|(a.provider,a.source.clone())));
         let before=self.accounts.len();
         let mut notes=self.discover_files(&candidates);
         if let (Some(roaming),Some(local))=(std::env::var_os("APPDATA"),std::env::var_os("LOCALAPPDATA")){
@@ -183,13 +202,34 @@ pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
 }
 
 struct Credential {token:String,account_id:Option<String>,identity:Option<String>,stamp:Option<std::time::SystemTime>}
+impl Account {
+    pub fn references_cli(&self)->bool {
+        matches!(self.provider,Provider::Codex|Provider::Kimi)
+            || self.provider==Provider::Claude && self.slot.as_deref().is_none_or(|slot|slot.starts_with("cli:"))
+    }
+    pub fn request_key(&self)->String {
+        json!([self.provider.name(),self.source,self.slot]).to_string()
+    }
+}
+fn login_binding(auth:&Credential)->String {
+    let (kind,value)=auth.identity.as_ref().map(|id|("identity",id.clone())).unwrap_or_else(||("token",json!([auth.account_id,auth.token]).to_string()));
+    let hash=ring::digest::digest(&ring::digest::SHA256,value.as_bytes()).as_ref().iter().map(|b|format!("{b:02x}")).collect::<String>();
+    format!("cli:{kind}:{hash}")
+}
 fn same_login(a:&Credential,b:&Credential)->bool{a.token==b.token||a.identity.as_ref().zip(b.identity.as_ref()).is_some_and(|(a,b)|a==b)}
 fn login_json(path:&Path)->Result<Value,String>{
     let raw=fs::read(path).map_err(|_|"无法读取登录文件".to_string())?;
     serde_json::from_slice(raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&raw)).map_err(|_|"登录文件不是有效的 JSON".into())
 }
 fn account_credentials(account:&Account)->Result<Credential,String>{
-    if account.provider==Provider::Claude&&account.slot.is_some(){claude::credentials(account)}else{credentials(account.provider,&account.source)}
+    if account.provider==Provider::Claude&&!account.references_cli(){return claude::credentials(account);}
+    let auth=credentials(account.provider,&account.source)?;
+    // Claude Code 的令牌（sk-ant-oat…）不含身份且每隔数小时轮换，按令牌绑定会把正常刷新当成换号；
+    // 与上游一致，不做换号校验。
+    if account.provider==Provider::Claude{return Ok(auth);}
+    let expected=account.slot.as_deref().ok_or("账号身份尚未确认，请在设置中重新绑定当前登录")?;
+    if expected!=login_binding(&auth){return Err("登录账号或凭据已变化，请确认后重新绑定当前登录".into());}
+    Ok(auth)
 }
 fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
     let root=login_json(path)?;
@@ -200,11 +240,15 @@ fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
     let identity=match provider{
         Provider::Codex=>account_id.as_ref().zip(claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_user_id").or_else(||claims.get("sub")).and_then(Value::as_str).filter(|s|!s.is_empty())).map(|(account,user)|format!("{account}:{user}")),
         Provider::Kimi=>claims.get("user_id").or_else(||claims.get("sub")).and_then(Value::as_str).filter(|s|!s.is_empty()).map(str::to_owned),
+        Provider::Claude=>claims.get("sub").and_then(Value::as_str).filter(|s|!s.is_empty()).map(str::to_owned),
         _=>None,
     };
     Ok(Credential{token,account_id,identity,stamp:fs::metadata(path).and_then(|m|m.modified()).ok()})
 }
-pub struct Event {pub id:String,pub result:Result<Snapshot,String>}
+pub struct Event {pub id:String,pub request_key:String,pub result:Result<Snapshot,String>}
+impl Event {
+    pub fn new(account:&Account,result:Result<Snapshot,String>)->Self{Self{id:account.id.clone(),request_key:account.request_key(),result}}
+}
 pub struct Service {tx:mpsc::SyncSender<Vec<Account>>,rx:mpsc::Receiver<Event>}
 impl Service {
     pub fn start()->Self{
@@ -213,9 +257,10 @@ impl Service {
             let agent=http_agent();
             let mut backoff:HashMap<String,(Instant,String)>=HashMap::new();
             while let Ok(accounts)=requests.recv(){for account in accounts.into_iter().filter(|a|a.enabled){
-                if let Some((until,message))=backoff.get(&account.id){if *until>Instant::now(){let _=results.send(Event{id:account.id,result:Err(message.clone())});continue;}}
-                let result=fetch(&agent,&account);if let Err((message,wait))=&result{if *wait>0{backoff.insert(account.id.clone(),(Instant::now()+Duration::from_secs(*wait),message.clone()));}}
-                if results.send(Event{id:account.id,result:result.map_err(|e|e.0)}).is_err(){return;}
+                let key=format!("{}:{}",account.id,account.request_key());
+                if let Some((until,message))=backoff.get(&key){if *until>Instant::now(){let _=results.send(Event::new(&account,Err(message.clone())));continue;}}
+                let result=fetch(&agent,&account);if let Err((message,wait))=&result{if *wait>0{backoff.insert(key,(Instant::now()+Duration::from_secs(*wait),message.clone()));}}
+                if results.send(Event::new(&account,result.map_err(|e|e.0))).is_err(){return;}
             }}
         });Self{tx,rx}
     }
@@ -256,6 +301,72 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn unreadable_quota_config_cannot_overwrite_recovered_data(){
+        let dir=std::env::temp_dir().join(format!("quota-load-protection-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
+        let previous=std::env::var_os("DAOZAI_DATA_DIR");std::env::set_var("DAOZAI_DATA_DIR",&dir);
+        let path=dir.join("ai-quota.json");
+        for bad in ["{",r#"{"accounts":[{"provider":"Codex"}]}"#]{
+            fs::write(&path,bad).unwrap();let mut loaded=Config::load();assert!(loaded.load_error.is_some());
+            let recovered=Config::default().json().to_string();fs::write(&path,&recovered).unwrap();loaded.selected="new".into();
+            assert!(loaded.save().is_err());assert_eq!(fs::read_to_string(&path).unwrap(),recovered);
+            assert!(Config::load().save().is_ok());
+        }
+        if let Some(value)=previous{std::env::set_var("DAOZAI_DATA_DIR",value);}else{std::env::remove_var("DAOZAI_DATA_DIR");}
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn cli_identity_binding_rejects_switches_and_requires_explicit_legacy_confirmation(){
+        let dir=std::env::temp_dir().join(format!("quota-bind-{}-{}",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        fs::create_dir_all(&dir).unwrap();
+        // Claude Code 的令牌会定期轮换，保持上游行为不做换号校验，见 claude_cli_token_refresh_keeps_working_like_upstream。
+        for provider in [Provider::Codex,Provider::Kimi]{
+            let path=dir.join(format!("{}.json",provider.name()));
+            let body=|token:&str|json!({"access_token":token});
+            fs::write(&path,body("synthetic-first").to_string()).unwrap();
+            let mut config=Config::default();config.add(provider,"工作账号".into(),path.clone()).unwrap();
+            let id=config.accounts[0].id.clone();
+            let saved=config.json();assert!(!saved.to_string().contains("synthetic-first"));
+            let restored=Config::from_json(&saved);assert!(account_credentials(&restored.accounts[0]).is_ok());
+            fs::write(&path,body("synthetic-second").to_string()).unwrap();
+            assert!(account_credentials(&config.accounts[0]).is_err(),"换号必须在网络请求前拒绝");
+            let expected=config.clone();config.discover_files(&[(provider,path.clone())]);
+            assert_eq!(config,expected,"自动发现不能把旧别名改绑新身份");
+            config.confirm_current_login(&id).unwrap();
+            assert_eq!(account_credentials(&config.accounts[0]).unwrap().token,"synthetic-second");
+            config.accounts[0].slot=None;
+            assert!(account_credentials(&config.accounts[0]).err().unwrap().contains("尚未确认"));
+            config.confirm_current_login(&id).unwrap();assert!(account_credentials(&config.accounts[0]).is_ok());
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn claude_cli_token_refresh_keeps_working_like_upstream(){
+        let dir=std::env::temp_dir().join(format!("quota-claude-{}-{}",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        fs::create_dir_all(&dir).unwrap();let path=dir.join(".credentials.json");
+        let credentials=|token:&str|json!({"claudeAiOauth":{"accessToken":token}}).to_string();
+        fs::write(&path,credentials("sk-ant-oat01-first")).unwrap();
+        let mut config=Config::default();config.add(Provider::Claude,"Claude".into(),path.clone()).unwrap();
+        fs::write(&path,credentials("sk-ant-oat01-second")).unwrap();
+        assert_eq!(account_credentials(&config.accounts[0]).unwrap().token,"sk-ant-oat01-second","Claude Code 定期刷新令牌后额度仍须可用");
+        config.accounts[0].slot=None;
+        assert!(account_credentials(&config.accounts[0]).is_ok(),"旧配置中的 Claude CLI 账号无需重新绑定");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn stable_cli_identity_allows_token_refresh_but_rejects_another_member(){
+        let dir=std::env::temp_dir().join(format!("quota-token-refresh-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
+        let path=dir.join("auth.json");
+        let body=|user:&str,nonce:&str|json!({"tokens":{"account_id":"workspace","access_token":format!("e30.{}.signature",base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json!({"sub":user,"jti":nonce}).to_string()))}});
+        fs::write(&path,body("member-a","one").to_string()).unwrap();let mut config=Config::default();config.add(Provider::Codex,"工作".into(),path.clone()).unwrap();
+        fs::write(&path,body("member-a","two").to_string()).unwrap();assert!(account_credentials(&config.accounts[0]).is_ok());
+        fs::write(&path,body("member-b","three").to_string()).unwrap();assert!(account_credentials(&config.accounts[0]).is_err());
+        fs::write(&path,json!({"access_token":"opaque","account_id":"first-workspace"}).to_string()).unwrap();
+        config.confirm_current_login(&config.accounts[0].id.clone()).unwrap();
+        fs::write(&path,json!({"access_token":"opaque","account_id":"second-workspace"}).to_string()).unwrap();
+        assert!(account_credentials(&config.accounts[0]).is_err(),"opaque token 的工作区变化也必须拒绝");
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn native_discovery_keeps_distinct_accounts_and_does_not_change_their_files(){
         let dir=std::env::temp_dir().join(format!("daozai-discovery-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));

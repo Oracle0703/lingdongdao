@@ -1,10 +1,13 @@
-﻿param([Parameter(Mandatory=$true)][string]$NsisCompiler)
+﻿param([Parameter(Mandatory=$true)][string]$NsisCompiler, [string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
 $id = 'DaozaiSetupTest' + [Guid]::NewGuid().ToString('N')
 $name = '岛仔安装测试-' + $id.Substring(15,8)
-$root = Join-Path $project ('target\' + $id)
+$shortcutName = "${name}（${id}）"
+$root = if ($OutputDirectory) { Join-Path $OutputDirectory $id } else { Join-Path $project ('target\' + $id) }
 $installed = Join-Path $root 'installed files'
+$oldInstalled = $installed
+$newInstalled = Join-Path $root 'moved installation'
 $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\' + $id
 $data = Join-Path $env:APPDATA $id
 New-Item -ItemType Directory -Path $root -Force | Out-Null
@@ -19,6 +22,26 @@ $setup = Join-Path $root 'Daozai-TestInstaller.exe'
 if ($LASTEXITCODE -ne 0) { throw '测试安装器编译失败' }
 New-Item -ItemType Directory -Path $data -Force | Out-Null
 Set-Content -LiteralPath $sentinel -Value 'keep-user-data'
+$shell = New-Object -ComObject WScript.Shell
+# 使用随机测试名称模拟原版入口；绝不创建、覆盖或卸载用户的真实原版。
+$originalLinks = @(
+    (Join-Path $shell.SpecialFolders.Item('Desktop') "$name.lnk"),
+    (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$name.lnk"),
+    (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\${name}设置.lnk")
+)
+$originalHashes = @{}
+foreach ($path in $originalLinks) { if (Test-Path -LiteralPath $path) { throw '测试原版入口意外存在，停止以避免覆盖' } }
+function Assert-OriginalEntries {
+    foreach ($path in $originalLinks) {
+        if (-not (Test-Path -LiteralPath $path) -or (Get-FileHash -LiteralPath $path).Hash -ne $originalHashes[$path]) { throw '原版快捷方式被修改或删除' }
+    }
+}
+function Run-Uninstall([string]$Directory) {
+    if ($Directory -notin @($oldInstalled,$newInstalled)) { throw '卸载目录超出测试范围' }
+    $process = Start-Process -FilePath (Join-Path $Directory 'Uninstall.exe') -ArgumentList @('/S',"_?=$Directory") -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(30000) -or $process.ExitCode -ne 0) { throw '卸载失败或超时' }
+    $process.Dispose()
+}
 function Run-Setup {
     param([string[]]$Options = @(), [switch]$UseRegisteredPath)
     $arguments = @('/S') + $Options
@@ -30,12 +53,13 @@ function Assert-Installed {
     param([bool]$Desktop = $true, [bool]$AutoStart = $false)
     $entry = Get-ItemProperty -LiteralPath $key
     if ($entry.InstallLocation -ne $installed -or $entry.DisplayVersion -ne '9.8.7') { throw '安装注册信息不正确' }
+    if ($entry.DisplayName -ne $shortcutName) { throw '系统显示名称没有隔离产品标识' }
     if ($entry.UninstallString -ne ('"' + (Join-Path $installed 'Uninstall.exe') + '"')) { throw '卸载命令不正确' }
     if ((Get-FileHash (Join-Path $installed 'daozai.exe')).Hash -ne (Get-FileHash $fixture).Hash) { throw '程序复制不正确' }
     $shell = New-Object -ComObject WScript.Shell
-    $desktopLink = Join-Path $shell.SpecialFolders.Item('Desktop') "$name.lnk"
+    $desktopLink = Join-Path $shell.SpecialFolders.Item('Desktop') "$shortcutName.lnk"
     if ((Test-Path -LiteralPath $desktopLink) -ne $Desktop) { throw '桌面快捷方式选项未生效' }
-    $paths = @((Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$name.lnk"))
+    $paths = @((Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$shortcutName.lnk"), (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\${shortcutName}设置.lnk"))
     if ($Desktop) { $paths += $desktopLink }
     foreach ($path in $paths) {
         if (-not (Test-Path -LiteralPath $path)) { throw "快捷方式不存在：$path" }
@@ -51,8 +75,17 @@ function Assert-Installed {
         if ($run -ne ('"' + (Join-Path $installed 'daozai.exe') + '"')) { throw '开机自启选项或路径不正确' }
     } elseif ($run) { throw '未勾选自启却设置了开机启动' }
     if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne 'keep-user-data') { throw '用户数据被修改' }
+    Assert-OriginalEntries
 }
 try {
+    $originalProbe = Join-Path $root 'original-shortcut.lnk'
+    $link = $shell.CreateShortcut($originalProbe)
+    $link.TargetPath = $fixture
+    $link.Save()
+    foreach ($path in $originalLinks) {
+        Copy-Item -LiteralPath $originalProbe -Destination $path
+        $originalHashes[$path] = (Get-FileHash -LiteralPath $path).Hash
+    }
     Run-Setup
     Assert-Installed
     Write-Output '通过：首次安装、含空格路径、快捷方式和卸载注册'
@@ -81,23 +114,35 @@ try {
     } finally { $mutex.Dispose() }
     Run-Setup -Options @('/AUTOSTART=1')
     Assert-Installed -AutoStart $true
+    $installed = $newInstalled
+    Run-Setup
+    Assert-Installed -AutoStart $true
+    Run-Uninstall $oldInstalled
+    Assert-Installed -AutoStart $true
+    if (Test-Path -LiteralPath (Join-Path $oldInstalled 'daozai.exe')) { throw '旧目录没有卸载' }
+    Write-Output '通过：安装位置 A→B，旧卸载器保留 B 的注册、快捷方式和自启'
     Set-Content -LiteralPath (Join-Path $installed 'user-file.txt') -Value 'keep-extra-file'
     # 使用原安装路径运行原生卸载器，只操作本测试的独立产品标识。
-    $process = Start-Process -FilePath (Join-Path $installed 'Uninstall.exe') -ArgumentList @('/S',"_?=$installed") -WindowStyle Hidden -PassThru
-    if (-not $process.WaitForExit(30000) -or $process.ExitCode -ne 0) { throw '卸载失败或超时' }
+    Run-Uninstall $installed
     if ((Test-Path -LiteralPath $key) -or (Test-Path -LiteralPath (Join-Path $installed 'daozai.exe'))) { throw '卸载残留程序或注册信息' }
     if ((Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue).$id) { throw '卸载残留自启项' }
     if (-not (Test-Path -LiteralPath (Join-Path $installed 'user-file.txt'))) { throw '卸载误删额外文件' }
     if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne 'keep-user-data') { throw '卸载误删用户数据' }
+    Assert-OriginalEntries
     Write-Output '通过：原生卸载、保留用户数据和额外文件'
+    Write-Output '通过：安装、升级、迁移和卸载均未改变同名原版入口'
 } finally {
     # 清理本测试的独立安装，避免失败时残留桌面快捷方式和自启项。
     if (Test-Path -LiteralPath $key) {
         $cleanupDirectory = (Get-ItemProperty -LiteralPath $key).InstallLocation
         $defaultDirectory = Join-Path $env:LOCALAPPDATA "Programs\$id"
-        if ($cleanupDirectory -ne $installed -and $cleanupDirectory -ne $defaultDirectory) { throw '测试清理目录超出预期范围' }
+        if ($cleanupDirectory -notin @($oldInstalled,$newInstalled,$defaultDirectory)) { throw '测试清理目录超出预期范围' }
         $cleanup = Start-Process -FilePath (Join-Path $cleanupDirectory 'Uninstall.exe') -ArgumentList @('/S',"_?=$cleanupDirectory") -WindowStyle Hidden -PassThru
         $null = $cleanup.WaitForExit(30000)
+    }
+    foreach ($path in $originalLinks) {
+        # 只清理本次创建的模拟入口；发现变化时保留证据。
+        if ((Test-Path -LiteralPath $path) -and $originalHashes.ContainsKey($path) -and (Get-FileHash -LiteralPath $path).Hash -eq $originalHashes[$path]) { Remove-Item -LiteralPath $path }
     }
     if (-not (Test-Path -LiteralPath $key)) {
         Remove-Item -LiteralPath $sentinel

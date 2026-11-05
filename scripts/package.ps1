@@ -4,6 +4,8 @@ $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
 try {
     $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"]+)"').Groups[1].Value
+    $appId = [regex]::Match((Get-Content src\brand.rs -Raw), 'macro_rules! app_id \{\s*\(\) => \{\s*"([A-Za-z0-9._-]+)"').Groups[1].Value
+    if (-not $appId) { throw 'Cannot read APP_ID from src/brand.rs' }
     if (-not $SkipBuild) {
         $env:CARGO_BUILD_JOBS = '1'
         cargo +stable-x86_64-pc-windows-msvc build --locked --release --bin daozai --target x86_64-pc-windows-msvc
@@ -35,7 +37,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $projectRoot $_) -Destination $stagingDirectory -Recurse
     }
     $setup = Join-Path $outputDirectory "Daozai-Setup-v$version-x64.exe"
-    & $NsisCompiler /V2 /WX "/DAPP_VERSION=$version" "/DPROJECT_DIR=$projectRoot" "/DSOURCE_EXE=$($binary.FullName)" "/DOUTPUT_FILE=$setup" (Join-Path $projectRoot 'installer\setup.nsi')
+    & $NsisCompiler /V2 /WX "/DAPP_ID=$appId" "/DAPP_VERSION=$version" "/DPROJECT_DIR=$projectRoot" "/DSOURCE_EXE=$($binary.FullName)" "/DOUTPUT_FILE=$setup" (Join-Path $projectRoot 'installer\setup.nsi')
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
     $archive = Join-Path $outputDirectory "$packageName.zip"
     Compress-Archive -LiteralPath $stagingDirectory -DestinationPath $archive

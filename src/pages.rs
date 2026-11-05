@@ -122,17 +122,19 @@ impl App {
         if lyrics_button.on_hover_text(if self.show_lyrics {"隐藏歌词"}else{"显示歌词"}).clicked() {
             if !has {self.say("先放一首歌吧");}
             else {
+                let previous=self.settings.clone();
                 self.show_lyrics=!self.show_lyrics;
                 self.settings.lyrics_enabled=self.show_lyrics;
-                self.settings.save();
+                self.persist_settings(previous);
             }
         }
         if has {
             let (button,button_card)=capsule(c,279.0,108.0,68.0,20.0,"m-island-lyrics",if self.settings.island_lyrics {Color32::from_gray(39)}else{Color32::from_gray(22)},Color32::from_gray(47));
             button_card.text(313.0,122.0,"岛上歌词",10.0,W::Semibold,if self.settings.island_lyrics {theme::WHITE}else{theme::GRAY},H::Center);
             if button.on_hover_text(if self.settings.island_lyrics {"关闭收起时的歌词"}else{"收起时显示当前歌词"}).clicked() {
+                let previous=self.settings.clone();
                 self.settings.island_lyrics=!self.settings.island_lyrics;
-                self.settings.save();
+                self.persist_settings(previous);
             }
         }
     }
@@ -271,10 +273,12 @@ impl App {
         c.circle(kx, 46.0, 8.0, theme::WHITE);
         paint::bell(&c.scaled(kx, 46.0, 0.9), kx, 46.0, mix(Color32::from_gray(140), theme::BLUE, on.clamp(0.0, 1.0)),0.0);
         if sw.clicked() {
+            let previous=self.water.clone();
             self.water.remind = !self.water.remind;
-            self.water.save();
-            self.last_reminder = self.t;
-            self.say(if self.water.remind { "饮水提醒已打开" } else { "饮水提醒已关闭" });
+            if self.persist_water(previous) {
+                self.last_reminder = self.t;
+                self.say(if self.water.remind { "饮水提醒已打开" } else { "饮水提醒已关闭" });
+            }
         }
 
         // 今天 · 3% · 下次 08:07
@@ -303,10 +307,11 @@ impl App {
         if self.last_drink.is_some() {
             c.text(191.0,114.0,"撤销",10.5,W::Regular,theme::GRAY,H::Center);
             if c.hit(177.0,98.0,28.0,25.0,"water-undo").on_hover_text("撤销最近一次饮水记录").clicked() {
-                if let Some((ml,hour))=self.last_drink.take() {
+                if let Some((ml,hour))=self.last_drink {
+                    let previous=self.water.clone();
                     self.water.drunk_ml=self.water.drunk_ml.saturating_sub(ml);
                     self.water.hours[hour]=self.water.hours[hour].saturating_sub(ml);
-                    self.water.save(); self.say("已撤销这次记录");
+                    if self.persist_water(previous) {self.last_drink=None;self.say("已撤销这次记录");}
                 }
             }
         }
@@ -416,13 +421,10 @@ impl App {
             bc.text(15.0 + title_w + 8.0 + lw / 2.0, 23.5, label, size::SMALL, W::Regular, theme::WHITE, H::Center);
             if r.clicked() {
                 if confirming {
-                    self.shelf.clear();
-                    self.icons.clear();
-                    self.shelf_born.clear();
-                    self.shelf_x.clear();
-                    self.shelf_first = 0;
-                    self.confirm_clear = None;
-                    self.say("置物架已清空（文件本身没动）");
+                    match self.shelf.clear() {
+                        Ok(())=>{self.icons.clear();self.shelf_born.clear();self.shelf_x.clear();self.shelf_first=0;self.confirm_clear=None;self.say("置物架已清空（文件本身没动）");},
+                        Err(error)=>self.say(format!("置物架保存失败，记录已保留：{error}")),
+                    }
                 } else {
                     self.confirm_clear = Some(self.t);
                 }
@@ -504,7 +506,10 @@ impl App {
                 if ui.button("复制完整路径").clicked(){cmds.push(Cmd::Copy(p.display().to_string()));ui.close_menu();}
                 if ui.button("从置物架移除").clicked(){delete=true;ui.close_menu();}
             });
-            if delete { self.shelf.remove(p); self.icons.remove(p); self.shelf_x.remove(p); self.shelf_born.remove(p); self.shelf_first=self.shelf_first.min(self.shelf.items.len().saturating_sub(5)); }
+            if delete { match self.shelf.remove(p) {
+                Ok(())=>{self.icons.remove(p);self.shelf_x.remove(p);self.shelf_born.remove(p);self.shelf_first=self.shelf_first.min(self.shelf.items.len().saturating_sub(5));},
+                Err(error)=>self.say(format!("置物架保存失败，记录已保留：{error}")),
+            } }
             else if r.clicked() { if p.exists(){cmds.push(Cmd::Open(p.clone()));} else {self.say("文件已移动或删除，可从置物架移除");} }
         }
     }
@@ -617,15 +622,16 @@ impl App {
                 let mut edit_this=false;
                 r.context_menu(|ui|{
                     if ui.button("编辑与提醒…").clicked(){edit_this=true;ui.close_menu();}
-                    if ui.button("取消提醒").clicked(){self.todos.items[i].due=None;self.todos.save();ui.close_menu();}
+                    if ui.button("取消提醒").clicked(){let previous=self.todos.clone();self.todos.items[i].due=None;self.persist_todos(previous);ui.close_menu();}
                 });
                 if edit_this {self.open_task_dialog(i);}
-                if delete {self.todos.items.remove(i);self.todos.save();self.todo_first=self.todo_first.min(self.todos.items.len().saturating_sub(3));break;}
+                if delete {let previous=self.todos.clone();self.todos.items.remove(i);if self.persist_todos(previous){self.todo_first=self.todo_first.min(self.todos.items.len().saturating_sub(3));}break;}
                 if r.clicked() && !edit_this && !reminder_clicked {
+                    let previous=self.todos.clone();
                     let now = self.todos.items[i].done_on.is_some();
                     self.todos.items[i].done_on = if now { None } else { Some(env.today.clone()) };
-                    self.todos.save();
-                    if !now {
+                    let saved=self.persist_todos(previous);
+                    if saved && !now {
                         self.todo_pop.vel += 5.0;
                         self.pet.react(crate::extras::PetState::Happy);
                     }

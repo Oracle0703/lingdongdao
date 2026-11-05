@@ -2,10 +2,9 @@
 use eframe::egui;
 use std::{io::{Read, Write}, path::PathBuf, sync::{mpsc::{self, Receiver}, Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
 
-const REPOSITORY: &str = "https://github.com/Renly1994/xiaotang-daozai";
-const API: &str = "https://api.github.com/repos/Renly1994/xiaotang-daozai/releases/latest";
-const RELEASES: &str = "https://github.com/Renly1994/xiaotang-daozai/releases/latest";
-const BACKUP_DOWNLOAD: &str = "https://hcnounojrizu.feishu.cn/wiki/MpfXwFGf8ijhitkfuxdcELdBnqg";
+const REPOSITORY: &str = crate::brand::REPOSITORY;
+const API: &str = crate::brand::RELEASE_API;
+const RELEASES: &str = crate::brand::RELEASES;
 
 #[derive(Clone, Debug)]
 struct Release { version: String, notes: String, page: String, package: Option<Package> }
@@ -209,8 +208,6 @@ impl State {
                         }
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
-                            ui.hyperlink_to(egui::RichText::new("飞书备用下载").size(11.5).color(theme::BLUE),BACKUP_DOWNLOAD);
-                            ui.label(egui::RichText::new("·").color(theme::DIM));
                             ui.hyperlink_to(egui::RichText::new("浏览器下载").size(11.5).color(theme::GRAY),&release.page);
                             ui.label(egui::RichText::new("·").color(theme::DIM));
                             ui.hyperlink_to(egui::RichText::new("查看发布说明").size(11.5).color(theme::GRAY),&release.page);
@@ -275,7 +272,7 @@ fn http_agent() -> Result<ureq::Agent, String> {
 
 fn check() -> Result<Option<Release>, String> {
     let response = http_agent()?
-        .get(API).set("User-Agent", concat!("Daozai/", env!("CARGO_PKG_VERSION")))
+        .get(API).set("User-Agent", concat!(crate::app_id!(), "/", env!("CARGO_PKG_VERSION")))
         .set("Accept", "application/vnd.github+json").call().map_err(|error| match error {
             ureq::Error::Status(403 | 429, _) => "检查过于频繁，请稍后重试".to_owned(),
             ureq::Error::Status(404, _) => "暂未找到正式版本，请查看发布页".to_owned(),
@@ -304,12 +301,12 @@ fn release_info(value: &serde_json::Value, current: &str) -> Result<Option<Relea
 
 fn download(release: &Release, tx: &mpsc::Sender<Event>, cancel: &AtomicBool) -> Result<PathBuf, String> {
     let package = release.package.as_ref().ok_or("请通过浏览器下载此版本")?;
-    let root = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).ok_or("无法找到更新缓存目录")?.join("Daozai/Updates");
+    let root = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).ok_or("无法找到更新缓存目录")?.join(crate::brand::APP_ID).join("Updates");
     let work = root.join(format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
     std::fs::create_dir_all(&work).map_err(|_| "无法创建更新缓存")?;
     let result = (|| {
         let response = http_agent()?
-            .get(&package.url).call().map_err(|_| "连接下载服务器失败，请检查网络或代理，或使用飞书备用下载")?;
+            .get(&package.url).call().map_err(|_| "连接下载服务器失败，请检查网络或代理，或使用浏览器下载")?;
         if !response.get_url().starts_with("https://") { return Err("更新下载未使用安全连接".into()); }
         let mut input = response.into_reader();
         let mut output = std::fs::File::create(work.join("update.zip")).map_err(|_| "无法保存更新包")?;
@@ -329,7 +326,7 @@ fn transfer(input: &mut impl Read, output: &mut impl Write, package: &Package, c
     let mut buffer = [0u8; 65536]; let mut total = 0u64;
     loop {
         if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
-        let length = input.read(&mut buffer).map_err(|_| "下载中断或等待超时，请重试或使用飞书备用下载")?;
+        let length = input.read(&mut buffer).map_err(|_| "下载中断或等待超时，请重试或使用浏览器下载")?;
         if length == 0 { break; }
         total += length as u64;
         if total > package.size { return Err("更新包大小不符，请重新下载".into()); }
@@ -348,7 +345,7 @@ fn launch_installer(work: &std::path::Path) -> Result<(), String> {
     let shell = std::env::var_os("SystemRoot").map(PathBuf::from).ok_or("无法找到 Windows 目录")?
         .join("System32/WindowsPowerShell/v1.0/powershell.exe");
     let mut child = std::process::Command::new(shell).args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(work.join("apply.ps1")).arg("-WorkPath").arg(work).arg("-TargetExe").arg(target)
+        .arg(work.join("apply.ps1")).arg("-WorkPath").arg(work).arg("-TargetExe").arg(target).arg("-AppId").arg(crate::brand::APP_ID)
         .arg("-ParentProcessId").arg(std::process::id().to_string()).creation_flags(0x08000000)
         .spawn().map_err(|_| "无法启动更新程序，请通过浏览器下载安装")?;
     // 脚本先确认缓存和安装目录可用，再允许主程序退出。
@@ -397,6 +394,8 @@ mod tests {
             let start = std::time::Instant::now();
             loop {
                 if let Ok((mut stream, _)) = listener.accept() {
+                    // Windows 上 accept 得到的连接会继承监听端的非阻塞模式。
+                    stream.set_nonblocking(false).unwrap();
                     stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
                     let mut request = [0; 4096];
                     let n = stream.read(&mut request).unwrap();
@@ -469,6 +468,9 @@ mod tests {
             "size":123,"digest":format!("sha256:{}", "a".repeat(64))}]);
         let parsed = release_info(&value, "0.6.39").unwrap().unwrap();
         assert!(parsed.package.is_some()); assert_eq!(parsed.notes, "更新说明");
+        let mut upstream=value.clone();
+        upstream["assets"][0]["browser_download_url"]="https://github.com/Renly1994/xiaotang-daozai/releases/download/v0.6.40/Daozai-v0.6.40-windows-x64.zip".into();
+        assert!(release_info(&upstream,"0.6.39").unwrap().unwrap().package.is_none(),"不能安装上游项目的更新包");
         for (field, bad) in [("name", serde_json::json!("source.zip")), ("browser_download_url", serde_json::json!("https://example.com/download.zip")),
             ("digest", serde_json::Value::Null), ("digest", serde_json::json!("sha256:bad")), ("size", serde_json::json!(0))] {
             let mut invalid = value.clone(); invalid["assets"][0][field] = bad;
@@ -558,7 +560,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = crate::app::App::new(&ctx, Default::default());
         app.updates.result = Some(Ok(Some(Release { version: "v0.6.50".into(),
-            notes: "- 更新下载支持 Windows 系统代理\n- 连接失败及时提示，避免长时间停在 0%\n- 新增飞书备用下载入口".into(), page: RELEASES.into(),
+            notes: "- 更新下载支持 Windows 系统代理\n- 连接失败及时提示，避免长时间停在 0%\n- 下载失败时可改用浏览器下载".into(), page: RELEASES.into(),
             package: Some(Package { url: String::new(), size: 100, hash: String::new() }) })));
         app.updates.dialog_open = true;
         app.settings_tab = 9;
@@ -582,7 +584,7 @@ mod tests {
             ("update-dialog", None, ""),
             ("update-connecting", Some(0.0), ""),
             ("update-downloading", Some(0.42), ""),
-            ("update-failed", None, "连接下载服务器失败，请检查网络或代理，或使用飞书备用下载"),
+            ("update-failed", None, "连接下载服务器失败，请检查网络或代理，或使用浏览器下载"),
         ] {
         app.updates.cancel = progress.map(|_| Arc::new(AtomicBool::new(false)));
         app.updates.progress = progress.unwrap_or_default();
