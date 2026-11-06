@@ -38,7 +38,10 @@ pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
 pub const WIN_H: f32 = 270.0;
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
+pub(crate) const SALARY_PAGE: usize = 8;
+pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "工资"];
+/// 各页面齿轮对应的设置分组。
+pub(crate) const PAGE_SETTINGS_TABS: [usize; 9] = [1, 2, 3, 5, 4, 7, 11, 8, crate::salary_ui::SETTINGS_TAB];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -78,6 +81,8 @@ pub struct Env {
     pub t: f64,
     /// `HH:MM:SS`
     pub clock: String,
+    /// 与 `clock` 同一时刻读取的毫秒数（0..1000），用于对齐下一次跳秒。
+    pub clock_ms: u16,
     /// `YYYY-MM-DD`
     pub today: String,
     /// 顶栏日期，例如 `10月28日 周三`
@@ -324,7 +329,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 8],
+    dots: [Spring; 9],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -431,6 +436,7 @@ pub struct App {
     pub(crate) llm: crate::llm_ui::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
+    pub(crate) salary: crate::salary_ui::State,
 }
 
 impl App {
@@ -531,6 +537,7 @@ impl App {
             updates: Default::default(),
             llm: Default::default(),
             resident: Default::default(), resident_power:(None,false),
+            salary: crate::salary_ui::State::load(),
         }
     }
 
@@ -979,7 +986,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=PAGE_SETTINGS_TABS[page];
             self.open_settings();
             return;
         }
@@ -1047,6 +1054,25 @@ impl App {
         self.slide.target = 0.0;
         self.dots_target();
         self.cancel_edit();
+    }
+
+    /// 展开途中直接换页，不播放切页滑动。有未完成的编辑时不切，留在原页面保住草稿。
+    fn jump_page(&mut self, page: usize) {
+        if page == self.page || !self.settings.visible_pages[page] || self.is_editing() { return; }
+        self.subpage=None;
+        self.page = page;
+        self.page_from = page;
+        self.page_t0 = self.t - 10.0;
+        self.slide.snap(0.0);
+        if page==CALENDAR_PAGE {self.request_calendar_month(false);}
+        self.dots_target();
+        self.h.target = self.expanded_height();
+    }
+
+    /// 收起时岛上实际画出了工资组件（歌词、极简、通知横幅都会占用岛体）。
+    pub(crate) fn salary_bar_visible(&self) -> bool {
+        self.resident.target.x[bar::SALARY].is_some() && self.notice.is_none()
+            && !self.island_lyrics_active() && !self.effective_minimal()
     }
 
     fn page_e(&self) -> f32 {
@@ -1209,7 +1235,7 @@ impl App {
             self.last_reminder = env.t;
             self.page_t0 = env.t - 10.0;
             if self.page==CALENDAR_PAGE {self.request_calendar_month(false);}
-            let load_error=[&self.settings.load_error,&self.todos.load_error,&self.shelf.load_error,&self.notification_apps.load_error].into_iter().find_map(|error|error.clone());
+            let load_error=[&self.settings.load_error,&self.todos.load_error,&self.shelf.load_error,&self.notification_apps.load_error,&self.salary.config.load_error].into_iter().find_map(|error|error.clone());
             if let Some(error)=load_error {
                 self.say(format!("数据读取失败，已禁止覆盖保存：{error}"));
             }
@@ -1217,6 +1243,7 @@ impl App {
         let mut cmds = Vec::new();
 
         self.tick(env, dt, elapsed);
+        self.salary_tick(env);
         self.sync_device(env);
         self.tick_alerts();
         let hud_active=self.notice.clone();
@@ -1230,9 +1257,8 @@ impl App {
         self.update_media(env,&ctx);
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
-        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
-        layout.reorder(&self.settings.resident_order);
-        if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
+        let parts=bar::Parts{battery:self.settings.show_battery&&env.battery.is_some(),quotas:self.quota_bar_indices().len(),music:self.media.is_music()&&!bell,focus:self.pomo.running,bell,pet:self.pet_enabled(),salary:self.salary_on_island()};
+        let mut layout=Layout::fitted(parts,&self.settings.resident_order,if self.settings.clock_period!=0 {40.0}else{0.0},PW);
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
             else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0-self.lyric_bar_width()/2.0);}
@@ -1335,7 +1361,12 @@ impl App {
             }
         } else {self.wheel_delta=0.0;}
         let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
+        // 悬停在收起的工资金额上展开时，直接打开工资页。
+        let salary_hover=!self.open && self.salary_bar_visible()
+            && env.cursor.is_some_and(|c|(c.x-(cx+self.resident.position(bar::SALARY))).abs()<=bar::SALARY_WIDTH/2.0+6.0 && c.y-top<=BAR_H+4.0);
+        let was_open=self.open;
         self.morph(want, inside, env.t, dt);
+        if salary_hover && !was_open && self.open && !self.drag_hot {self.jump_page(SALARY_PAGE);}
         self.update_pet(env, cx);
 
         // ---------- 绘制 ----------
@@ -1375,7 +1406,9 @@ impl App {
             let width_progress=if (to-from).abs()<1.0 {if banner{1.0}else{0.0}}else{((self.w.pos-from)/(to-from)).clamp(0.0,1.0)};
             let (opacity,header_opacity)=if banner {(self.hud_alpha*smoothstep(0.45,0.85,width_progress),1.0-smoothstep(0.05,0.40,width_progress))}
                 else {(self.hud_alpha*smoothstep(0.20,0.60,width_progress),1.0-smoothstep(0.05,0.25,width_progress))};
-            if !minimal_pill||pc>0.0 {self.shared_header(&base.faded(header_opacity),cx,pc,reveal,env);}
+            // 顶栏被系统提示盖住（几乎透明）时只画不点，点击交给提示本身。
+            let header=base.faded(header_opacity);let header=if header_opacity<0.8{header.ghost()}else{header};
+            if !minimal_pill||pc>0.0 {self.shared_header(&header,cx,pc,reveal,env);}
             if let Some(a)=self.hud_notice.clone(){
                 let overlay=Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect())).faded(opacity);
                 let overlay=if opacity<0.85||!banner{overlay.ghost()}else{overlay};
@@ -1470,12 +1503,16 @@ impl App {
             || self.hud_alpha > 0.003 && self.hud_alpha < 0.997
             || !self.notice_width.settled(1.0);
         let pet_visible=self.pet_a>0.01 && !self.open && !minimal_pill;
+        let salary_visible=if self.open {self.page==SALARY_PAGE}else{!minimal_pill && self.salary_bar_visible()};
         let ambient=self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
             || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
-            || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some());
+            || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some())
+            || salary_visible && self.salary_animating(self.open);
         let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping;
         // 交互形变保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。
-        let repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
+        let mut repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
+        // 上班中金额可见时，对齐系统时钟的下一次跳秒，保证金额每秒都更新。
+        if let Some(wait)=self.salary_next_tick(salary_visible) {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64(wait));}
         cmds.append(&mut self.pending);
         FrameOut {
             region: rel(floating_toast.map_or(region,|toast|region.union(toast)).intersect(ui.max_rect())),
@@ -1673,6 +1710,11 @@ impl App {
         if self.pomo.running && compact_alpha>0.004 {
             crate::focus_bar::draw(&base.faded(compact_alpha),local_cx+layout.x[bar::FOCUS].unwrap(),15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false);
         }
+        if let Some(x)=layout.x[bar::SALARY].filter(|_|compact_alpha>0.004) {
+            let alpha=compact_alpha*layout.pet_clearance(bar::SALARY);
+            let c=base.faded(alpha);let c=if alpha<0.8{c.ghost()}else{c};
+            self.draw_salary_bar(&c,local_cx+x);
+        }
     }
 
     fn update_pet(&mut self, env: &Env, cx: f32) {
@@ -1706,7 +1748,7 @@ impl App {
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}
+        if settings.clicked(){self.settings_tab=PAGE_SETTINGS_TABS[self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
@@ -1747,6 +1789,7 @@ impl App {
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
+            SALARY_PAGE => ("今日", "工资", theme::YELLOW),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -1804,6 +1847,7 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
+            SALARY_PAGE => self.page_salary(c),
             _ => self.page_settings(c),
         }
     }

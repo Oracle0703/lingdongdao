@@ -623,6 +623,7 @@ pub(crate) mod tests {
 
     #[test]
     fn config_round_trips_and_clamps() {
+        let _env = crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("daozai-llm-config-{}", std::process::id()));
         let old = std::env::var_os("DAOZAI_DATA_DIR");
         std::env::set_var("DAOZAI_DATA_DIR", &dir);

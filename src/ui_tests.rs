@@ -3,7 +3,7 @@ use crate::app::{App, Env, Options, PH, PW, WIN_H, WIN_W};
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use std::sync::Mutex;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn v0649_settings_and_mail_accounts_survive_upgrade(){
@@ -26,7 +26,11 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     for _ in 0..2 {
         crate::model::Settings::load().save().unwrap();
         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
-        for line in legacy.lines(){assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");}
+        for line in legacy.lines(){
+            // 新增的工资页追加在末尾，且保持关闭；其他旧设置原样保留。
+            let line=match line {"visible_pages=10111111"=>"visible_pages=101111110","page_order=5,2,0,1,3,4,6,7"=>"page_order=5,2,0,1,3,4,6,7,8",line=>line};
+            assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");
+        }
     }
     std::fs::write(directory.join("mail-accounts.json"),br#"[{"email":"OldUser@qq.com","provider":"qq","enabled":true},{"email":"old@icloud.com","provider":"icloud","enabled":false}]"#).unwrap();
     let accounts=crate::mail::load_accounts();
@@ -239,8 +243,8 @@ fn settings_keep_dark_buttons_when_system_theme_changes() {
 #[test]
 fn expanded_settings_routes_preserve_inline_controls(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    for (page,tab) in [1,2,3,5,4,7,11,8].into_iter().enumerate(){
-        let mut h=H::new();h.app.show_page(page);h.hover(H::local(200.0,40.0),1.0);
+    for (page,tab) in [1,2,3,5,4,7,11,8,13].into_iter().enumerate(){
+        let mut h=H::new();h.app.settings.visible_pages[page]=true;h.app.show_page(page);h.hover(H::local(200.0,40.0),1.0);
         h.click(H::local(394.0,18.0));
         assert!(h.app.settings_open,"页面 {page} 应打开设置窗口");
         assert_eq!(h.app.settings_tab,tab);assert_eq!(h.app.page,page);
@@ -315,6 +319,10 @@ struct H {
     file_drop_zone:Option<Rect>,
     hovered_files:Vec<egui::HoveredFile>,
     dropped_files:Vec<egui::DroppedFile>,
+    clock:String,
+    clock_ms:u16,
+    today:String,
+    repaint_after:std::time::Duration,
 }
 
 impl H {
@@ -324,7 +332,7 @@ impl H {
         std::env::set_var("DAOZAI_DATA_DIR", &dir);
         let ctx = egui::Context::default();
         let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
-        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),media_sources:vec![],power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
+        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),media_sources:vec![],power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![],clock:"09:41:00".into(),clock_ms:0,today:"2026-10-28".into(),repaint_after:std::time::Duration::ZERO }
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
         self.t += 1.0 / 60.0;
@@ -339,8 +347,9 @@ impl H {
         };
         let env = Env {
             t: self.t,
-            clock: "09:41:00".into(),
-            today: "2026-10-28".into(),
+            clock: self.clock.clone(),
+            clock_ms: self.clock_ms,
+            today: self.today.clone(),
             date: "10月28日 周三".into(),
             cursor: self.cursor,
             bt: self.bt.clone(),
@@ -358,12 +367,13 @@ impl H {
         let region=&mut self.region;
         let hit=&mut self.hit;
         let animating=&mut self.animating;
+        let repaint_after=&mut self.repaint_after;
         let app = &mut self.app;
         let file_drop_zone=&mut self.file_drop_zone;
         let output = self.ctx.run(raw, |ctx| {
             egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx, |ui| {
                 let win = Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H));
-                let frame=app.frame(ui, win, &env);*region=frame.region;*hit=frame.hit;*animating=frame.animating;*file_drop_zone=frame.file_drop_zone;cmds.extend(frame.cmds);
+                let frame=app.frame(ui, win, &env);*region=frame.region;*hit=frame.hit;*animating=frame.animating;*repaint_after=frame.repaint_after;*file_drop_zone=frame.file_drop_zone;cmds.extend(frame.cmds);
             });
         });
         self.shapes=output.shapes;
@@ -1472,7 +1482,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true;8]);
+    assert_eq!(h.app.settings.visible_pages,[true,true,true,true,true,true,true,true,false],"工资页默认关闭");
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -1480,17 +1490,21 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save().unwrap();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,false]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
     assert!(!restarted.settings.show_battery);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false,false]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true],"旧版页面开关应保留，并开启新增的日程页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,false],"旧版页面开关应保留，并开启新增的日程页");
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=11111111\n").unwrap();
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false],"旧版配置升级后工资页保持关闭");
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000001\n").unwrap();
+    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,true]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true;8]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false]);
 }
 
 #[test]
@@ -3553,10 +3567,10 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7];
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8];
     h.app.settings.save().unwrap();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
     for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
@@ -3570,10 +3584,12 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,2);
     h.app.set_page_visible(2,false);
     assert_eq!(h.app.page,5);
-    for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
+    for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","0,0,1,2,3,4,5,6,7","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8]);
     }
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"page_order=5,2,0,1,3,4,6,7\n").unwrap();
+    assert_eq!(crate::model::Settings::load().page_order,[5,2,0,1,3,4,6,7,8],"旧版 8 页排序升级后工资页排在最后");
 }
 
 #[test]
@@ -3599,9 +3615,9 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }
 
@@ -4651,4 +4667,292 @@ fn music_source_settings_selection_and_timing_fit_small_window() {
     assert_eq!(h.app.settings.music_source,"QQMusic.exe");assert_eq!(crate::model::Settings::load().music_source,"QQMusic.exe");
     let shapes=frame(&mut h,vec![]);let shapes=click(&mut h,&shapes,&crate::smtc::source_name("QQMusic.exe"));click(&mut h,&shapes,"自动选择");
     assert!(h.app.settings.music_source.is_empty());assert!(crate::model::Settings::load().music_source.is_empty());assert_eq!(h.app.settings.lyric_delay_ms,-350);
+}
+
+fn salary_harness() -> H {
+    let mut h=H::new();
+    h.app.settings.pet=false;
+    h.app.salary.config=crate::salary::Config{monthly_cents:1_000_000,..Default::default()};
+    h.app.settings.visible_pages[crate::app::SALARY_PAGE]=true;
+    for _ in 0..90 {h.frame(vec![]);}
+    h
+}
+
+#[test]
+fn salary_component_appears_on_the_island_only_from_work_start() {
+    use crate::bar_layout::SALARY;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.pet=false;h.frame(vec![]);
+    let baseline=h.app.resident.target.x;
+    assert!(baseline[SALARY].is_none(),"默认不显示工资");
+    h.app.salary.config=crate::salary::Config{monthly_cents:1_000_000,..Default::default()};
+    h.frame(vec![]);
+    assert_eq!(h.app.resident.target.x,baseline,"工资页关闭时岛上不显示金额");
+    h.app.settings.visible_pages[crate::app::SALARY_PAGE]=true;
+    // 2026-10-28 是周三，2026-10-31 是周六。
+    for (today,clock,shown) in [("2026-10-28","08:59:59",false),("2026-10-28","09:00:00",true),("2026-10-28","12:30:00",true),("2026-10-28","18:30:00",true),("2026-10-28","23:59:59",true),("2026-10-31","10:00:00",false)] {
+        h.today=today.into();h.clock=clock.into();h.frame(vec![]);
+        assert_eq!(h.app.resident.target.x[SALARY].is_some(),shown,"{today} {clock}");
+        if !shown {assert_eq!(h.app.resident.target.x,baseline,"不显示时布局与没有这个功能时一致");}
+    }
+    h.today="2026-10-28".into();h.clock="10:00:00".into();
+    h.app.salary.config.island=false;h.frame(vec![]);
+    assert_eq!(h.app.resident.target.x,baseline,"关闭「收起时显示金额」后不显示");
+    h.app.salary.config=crate::salary::Config::default();h.frame(vec![]);
+    assert_eq!(h.app.resident.target.x,baseline,"未配置时不显示");
+}
+
+#[test]
+fn hovering_the_salary_amount_opens_the_salary_page() {
+    use crate::bar_layout::{CLOCK,SALARY};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=salary_harness();
+    assert!(!h.app.open);assert_eq!(h.app.page,0);
+    let x=WIN_W/2.0+h.app.resident.position(SALARY);
+    h.hover(Pos2::new(x,15.0),0.6);
+    assert!(h.app.open);assert_eq!(h.app.page,crate::app::SALARY_PAGE,"悬停在金额上展开时直接打开工资页");
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="上班中 · 距下班 8小时19分")));
+    h.cursor=None;for _ in 0..90 {h.frame(vec![]);}
+    assert!(!h.app.open);
+    h.app.go(1,1.0);for _ in 0..30 {h.frame(vec![]);}
+    h.hover(Pos2::new(WIN_W/2.0+h.app.resident.position(CLOCK),15.0),0.6);
+    assert!(h.app.open);assert_eq!(h.app.page,1,"悬停在其他位置时打开上次停留的页面");
+    h.cursor=None;for _ in 0..90 {h.frame(vec![]);}
+    h.click(Pos2::new(x,15.0));
+    assert!(h.app.open);assert_eq!(h.app.page,crate::app::SALARY_PAGE,"点击金额打开工资页");
+}
+
+#[test]
+fn salary_amount_updates_every_second_and_animates_only_while_rolling() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=salary_harness();
+    h.app.salary.animations=Some(true);
+    let second=std::time::Duration::from_secs(1);
+    assert!(h.repaint_after<=second+std::time::Duration::from_millis(20));
+    h.clock="09:41:01".into();h.clock_ms=5;h.frame(vec![]);
+    assert!(h.app.salary.rolling(h.app.t));
+    assert_eq!(h.repaint_after,std::time::Duration::from_secs_f64(1.0/30.0),"数字滚动时为 30 帧");
+    h.clock_ms=600;for _ in 0..30 {h.frame(vec![]);}
+    assert!(!h.app.salary.rolling(h.app.t));
+    let wait=h.repaint_after.as_secs_f64();
+    assert!((wait-0.41).abs()<1e-6,"滚动结束后按毫秒数等到下一次跳秒：{wait}");
+    h.clock="12:30:00".into();for _ in 0..30 {h.frame(vec![]);}
+    h.clock="12:30:01".into();for _ in 0..30 {h.frame(vec![]);}
+    assert!(!h.app.salary.rolling(h.app.t),"午休时金额不变，不滚动");
+    assert_eq!(h.repaint_after,second,"午休时与改动前一样每秒刷新一次");
+}
+
+#[test]
+fn salary_page_guides_setup_and_routes_to_its_settings() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.visible_pages[crate::app::SALARY_PAGE]=true;
+    h.app.show_page(crate::app::SALARY_PAGE);h.hover(H::local(200.0,40.0),1.0);
+    h.click_text("去设置");
+    assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,crate::salary_ui::SETTINGS_TAB);
+    assert_eq!(h.app.page,crate::app::SALARY_PAGE);
+}
+
+#[test]
+#[ignore="按需导出工资组件与工资页的实际渲染画面"]
+fn salary_layout_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_SALARY_PREVIEW_DIR").expect("需指定预览目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let configured=crate::salary::Config{monthly_cents:1_000_000,..Default::default()};
+    // (名称, 日期, 跳秒前后的时间, 截图帧距跳秒的秒数, 是否展开, 是否已配置)
+    for (name,today,clock,after,open,ready) in [
+        ("collapsed-working","2026-11-05",("10:30:00","10:30:01"),0.6,false,true),
+        ("collapsed-rolling","2026-11-05",("10:30:00","10:30:01"),0.10,false,true),
+        ("collapsed-after-work","2026-11-05",("18:30:00","18:30:01"),0.6,false,true),
+        ("page-working","2026-11-05",("10:30:00","10:30:01"),0.6,true,true),
+        ("page-bounce","2026-11-05",("10:30:00","10:30:01"),0.22,true,true),
+        ("page-lunch","2026-11-05",("12:30:00","12:30:01"),0.6,true,true),
+        ("page-rest-day","2026-11-07",("10:00:00","10:00:01"),0.6,true,true),
+        ("page-unconfigured","2026-11-05",("10:30:00","10:30:01"),0.6,true,false),
+        ("page-invalid","2026-11-05",("10:30:00","10:30:01"),0.6,true,false),
+    ] {
+        let mut h=H::new();
+        h.app.settings.visible_pages[crate::app::SALARY_PAGE]=true;
+        if ready {h.app.salary.config=configured.clone();}
+        if name=="page-invalid" {h.app.salary.config=crate::salary::Config{lunch_start:7*60,..configured.clone()};}
+        if open {h.app.show_page(crate::app::SALARY_PAGE);}
+        let mut raster=crate::preview_raster::Raster::new(1280,560);
+        let (tick,last)=(150usize,150+(after*60.0) as usize);
+        for frame in 0..=last {
+            let t=frame as f64/60.0;
+            let env=Env{t,clock:(if frame<tick{clock.0}else{clock.1}).into(),today:today.into(),date:"11月5日 周四".into(),battery:Some(76),cursor:open.then(||H::local(300.0,40.0)),..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),
+                viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+            let output=h.ctx.run(raw,|ctx|{
+                egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});
+            });
+            raster.update_textures(&output.textures_delta);
+            if frame==last {
+                raster.buf.fill([0.95,0.96,0.98,1.0]);
+                raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                let image=image::RgbaImage::from_raw(1280,560,rgba).unwrap();
+                let (y,height)=if open{(0,320)}else{(0,90)};
+                image::imageops::crop_imm(&image,180,y,920,height).to_image().save(dest.join(format!("{name}.png"))).unwrap();
+            }
+            raster.free_textures(&output.textures_delta);
+        }
+    }
+}
+
+#[test]
+#[ignore="按需导出工资设置页的实际渲染画面"]
+fn salary_settings_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_SALARY_PREVIEW_DIR").expect("需指定预览目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();
+    h.app.settings.visible_pages[crate::app::SALARY_PAGE]=true;
+    h.app.salary.config=crate::salary::Config{monthly_cents:1_000_000,..Default::default()};
+    h.app.settings_tab=crate::salary_ui::SETTINGS_TAB;h.app.open_settings();h.ctx.set_embed_viewports(false);
+    let mut raster=crate::preview_raster::Raster::new(690,700);
+    for frame in 0..4 {
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+        let time=frame as f64*0.02;
+        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+            let id=viewport.ids.this;
+            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,700.0))),time:Some(time),viewports:std::iter::once((id,egui::ViewportInfo::default())).collect(),..Default::default()};
+            *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+        });
+        let parent=h.ctx.run(egui::RawInput::default(),|ctx|h.app.settings_ui(ctx,false));
+        let child=output.lock().unwrap().take().unwrap();
+        // 两个视口共用字体纹理：先应用整张纹理，再应用局部更新。
+        let mut set:Vec<_>=parent.textures_delta.set.iter().chain(&child.textures_delta.set).cloned().collect();
+        set.sort_by_key(|(_,delta)|delta.pos.is_some());
+        raster.update_textures(&egui::TexturesDelta{set,free:vec![]});
+        if frame==3 {
+            raster.buf.fill([0.0,0.0,0.0,1.0]);
+            raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
+            let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+            image::save_buffer(dest.join("settings.png"),&rgba,690,700,image::ColorType::Rgba8).unwrap();
+        }
+    }
+}
+
+/// 模拟真实时钟和按 `repaint_after` 调度的帧（每帧额外晚 8 ms，接近 Windows 默认计时器精度），确认金额每一秒都更新、没有漏秒。
+#[test]
+fn salary_repaints_stay_aligned_with_the_wall_clock() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for animate in [false,true] {
+        let mut h=salary_harness();
+        h.app.salary.animations=Some(animate);
+        let start=h.t;
+        let wall=|t:f64|(9*3600+41*60) as f64+0.37+(t-start);
+        let (mut t,mut seen,mut frames)=(start,Vec::<u32>::new(),0);
+        while t-start<300.0 {
+            let now=wall(t);let secs=now.floor() as u32;
+            h.clock=format!("{:02}:{:02}:{:02}",secs/3600,secs/60%60,secs%60);
+            h.clock_ms=((now-now.floor())*1000.0) as u16;
+            h.t=t-1.0/60.0;h.frame(vec![]);frames+=1;
+            if seen.last()!=Some(&secs){seen.push(secs);}
+            t+=h.repaint_after.as_secs_f64()+0.008;
+        }
+        assert!(seen.windows(2).all(|pair|pair[1]==pair[0]+1),"动画{}时不能漏掉任何一秒",if animate{"开启"}else{"关闭"});
+        assert!(seen.len()>=300);
+        if animate {assert!(frames<300*13,"滚动时的帧数超出预期：{frames}");}
+        else {
+            assert!(frames<=300*2+5,"关闭动画后每秒最多两帧：{frames}");
+            assert!(!h.app.salary.rolling(h.app.t)&&!h.app.salary.bouncing(h.app.t),"关闭动画时不滚动、不跳动");
+        }
+    }
+}
+
+#[test]
+fn legacy_resident_order_gains_the_salary_component_when_loaded() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"resident_order=7,6,2,0,9,1\n").unwrap();
+    assert_eq!(crate::model::Settings::load().resident_order,vec![7,6,2,0,9,1,crate::bar_layout::SALARY]);
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"resident_order=7,6,2,0,9,1,10\n").unwrap();
+    assert_eq!(crate::model::Settings::load().resident_order,vec![7,6,2,0,9,1,10]);
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"resident_order=7,7,2,0,9,1\n").unwrap();
+    assert!(crate::model::Settings::load().resident_order.is_empty(),"无效排列回到默认");
+}
+
+#[test]
+fn dragging_files_over_the_salary_amount_still_opens_the_shelf() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=salary_harness();
+    let x=WIN_W/2.0+h.app.resident.position(crate::bar_layout::SALARY);
+    h.hovered_files=vec![egui::HoveredFile{path:Some("report.pdf".into()),..Default::default()}];
+    h.hover(Pos2::new(x,15.0),0.6);
+    assert!(h.app.open);assert_eq!(h.app.page,3,"拖入文件优先打开置物架");
+}
+
+/// Codex 复审 C1：浏览器极简收起时编辑器草稿会保留；之后悬停工资金额展开，应回到草稿所在页面，而不是切到工资页。
+#[test]
+fn hovering_the_salary_amount_keeps_an_unfinished_editor_on_its_page() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for todo in [false,true] {
+        let mut h=salary_harness();
+        h.app.settings.browser_minimal=true;
+        if todo {h.app.show_page(4);h.app.adding=true;h.app.buf="合成的待办草稿".into();}
+        else {h.app.open_calendar_editor(None);h.app.calendar.draft.as_mut().unwrap().title="合成的日程草稿".into();}
+        let page=h.app.page;
+        h.hover(H::local(200.0,60.0),0.8);
+        assert!(h.app.open&&h.app.is_editing());
+        h.browser_at_top=Some(true);h.cursor=None;
+        for _ in 0..90 {h.frame(vec![]);}
+        assert!(!h.app.open&&h.app.is_editing(),"极简收起保留草稿");
+        h.browser_at_top=Some(false);
+        for _ in 0..90 {h.frame(vec![]);}
+        assert!(h.app.salary_bar_visible());
+        let x=WIN_W/2.0+h.app.resident.position(crate::bar_layout::SALARY);
+        h.hover(Pos2::new(x,15.0),0.8);
+        assert!(h.app.open);
+        assert_eq!(h.app.page,page,"有未完成的编辑时留在原页面");
+        assert!(h.app.is_editing(),"草稿没有被丢掉");
+    }
+}
+
+/// Codex 复审 C2：系统提示盖住岛体时，原工资金额位置的点击不能打开工资页。
+#[test]
+fn hidden_salary_amount_does_not_capture_clicks_under_a_hud() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=salary_harness();
+    let p=Pos2::new(WIN_W/2.0+h.app.resident.position(crate::bar_layout::SALARY),15.0);
+    h.app.alert("大写锁定","已开启",5,false);
+    h.cursor=None;
+    for _ in 0..60 {h.frame(vec![]);}
+    assert!(h.app.notice.is_some()&&!h.app.open&&!h.app.salary_bar_visible());
+    assert!(h.region.contains(p)&&h.hit.contains(p),"点击位置在真实窗口和命中区域内");
+    let page=h.app.page;
+    h.click(p);
+    assert_eq!(h.app.page,page,"看不见的工资金额不能接收点击");
+    assert!(h.app.notice.is_some()&&!h.app.open);
+}
+
+/// Codex 复审 C5：进入午休、下班的那一秒金额最后涨一次，但按设计静止切换。
+#[test]
+fn salary_does_not_animate_when_entering_lunch_or_after_work() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for (before,at,phase) in [("11:59:59","12:00:00",crate::salary::DayPhase::Lunch),("17:59:59","18:00:00",crate::salary::DayPhase::AfterWork)] {
+        let mut h=salary_harness();h.app.salary.animations=Some(true);
+        h.clock=before.into();
+        for _ in 0..90 {h.frame(vec![]);}
+        let previous=h.app.salary.snap.today;
+        h.clock=at.into();h.frame(vec![]);
+        assert_eq!(h.app.salary.snap.phase,phase);
+        assert!(h.app.salary.snap.today>previous,"{at} 金额仍然记上最后一秒");
+        assert!(!h.app.salary.rolling(h.app.t)&&!h.app.salary.bouncing(h.app.t),"{at} 不再滚动或跳金币");
+        assert!(h.repaint_after>=std::time::Duration::from_millis(500),"{at} 不进入 30 帧");
+    }
+}
+
+/// Codex 复审 C3：salary.txt 里有看不懂的字段时，工资页说明读取失败，而不是「还没有设置工资」。
+#[test]
+fn salary_page_reports_a_config_that_failed_to_load() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=salary_harness();
+    h.app.salary.config.load_error=Some("salary.txt 中 start=25:00 无法识别".into());
+    h.frame(vec![]);
+    assert!(!h.app.salary_on_island(),"读取失败时岛上不显示金额");
+    h.app.show_page(crate::app::SALARY_PAGE);h.hover(H::local(200.0,40.0),1.0);
+    let shown=|h:&H,label:&str|h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()==label));
+    assert!(shown(&h,"工资配置读取失败")&&!shown(&h,"还没有设置工资"));
 }

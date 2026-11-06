@@ -1,15 +1,16 @@
 use super::*;
 
-struct Fixture { app: App, previous: Option<std::ffi::OsString> }
+struct Fixture { app: App, previous: Option<std::ffi::OsString>, _env: std::sync::MutexGuard<'static, ()> }
 impl Fixture {
     fn new() -> Self {
+        let env = crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let previous = std::env::var_os("DAOZAI_DATA_DIR");
         let path = std::env::temp_dir().join(format!("daozai-mail-regression-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
         std::env::set_var("DAOZAI_DATA_DIR", path);
         let mut app = App::new(&egui::Context::default(), Options { fetch_lyrics: false, ..Default::default() });
         app.settings.mail_enabled = true;
         app.mail.accounts = vec![mail::Account { email: "test@example.com".into(), provider: mail::Provider::Qq, custom: None, enabled: true }];
-        Self { app, previous }
+        Self { app, previous, _env: env }
     }
 }
 impl Drop for Fixture {

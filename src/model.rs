@@ -7,6 +7,7 @@
 //!   %APPDATA%\<APP_ID>\water.txt      -> bottle=<ml> / goal=<ml> / start=YYYY-MM-DD
 //!   %APPDATA%\<APP_ID>\shelf.txt      -> 置物清单（每行一个绝对路径）
 //!   %APPDATA%\<APP_ID>\llm.txt        -> 自建大模型的地址与模型（API Key 在凭据管理器）
+//!   %APPDATA%\<APP_ID>\salary.txt     -> 月薪与作息（只用于本机计算工资，见 `salary.rs`）
 //!
 //! 设置环境变量 `DAOZAI_DATA_DIR` 可把以上目录整体改到别处（用于与已安装的
 //! 原工具并存、或跑测试时不碰真实数据）。
@@ -37,7 +38,7 @@ fn read_optional(path:&Path)->Result<Option<String>,String> {
     }
 }
 
-fn read_kv_checked(path:&Path)->Result<Vec<(String,String)>,String> {
+pub(crate) fn read_kv_checked(path:&Path)->Result<Vec<(String,String)>,String> {
     let mut out = Vec::new();
     if let Some(text) = read_optional(path)? {
         for line in text.trim_start_matches('\u{feff}').lines() {
@@ -49,7 +50,7 @@ fn read_kv_checked(path:&Path)->Result<Vec<(String,String)>,String> {
     Ok(out)
 }
 
-fn ensure_loaded(error:&Option<String>)->std::io::Result<()> {
+pub(crate) fn ensure_loaded(error:&Option<String>)->std::io::Result<()> {
     if let Some(error)=error {return Err(std::io::Error::other(format!("{error}；为保护原数据已禁止保存，请修复后重新加载")));}
     Ok(())
 }
@@ -111,8 +112,8 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 8],
-    pub page_order: [usize; 8],
+    pub visible_pages: [bool; 9],
+    pub page_order: [usize; 9],
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
@@ -150,7 +151,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false], page_order: [0,1,2,3,4,5,6,7,8], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
@@ -182,11 +183,13 @@ impl Settings {
                 "avoid_apps" => s.avoid_apps = serde_json::from_str(&v).unwrap_or_default(),
                 "resident_order" => {
                     let order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
-                    if crate::bar_layout::valid_order(&order){s.resident_order=order;}
+                    if let Some(order)=crate::bar_layout::migrate_order(order){s.resident_order=order;}
                 }
                 "page_order" => {
-                    if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                    if let Ok(mut order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
+                        // 旧版只有 8 页：工资页排在最后。
+                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {order.push(8);}
+                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
                         }
                     }
@@ -194,9 +197,10 @@ impl Settings {
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
-                    for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
+                    // 6、7 号页面跟随任一已开页面；工资页（8 号）在旧配置中保持关闭。
+                    for enabled in s.visible_pages.iter_mut().take(8).skip(v.len()){*enabled=v.bytes().any(|b|b==b'1');}
                 }
                 "read_notifications" => s.read_notifications=v=="1",
                 "notification_preview" => s.notification_preview=v=="1",

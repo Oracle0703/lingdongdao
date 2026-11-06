@@ -37,6 +37,8 @@ mod bar_layout;
 mod resident_settings;
 mod avoidance;
 mod focus_bar;
+mod salary;
+mod salary_ui;
 #[cfg(windows)]
 pub mod system;
 pub mod paint;

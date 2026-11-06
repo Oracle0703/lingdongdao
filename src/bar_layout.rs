@@ -9,11 +9,31 @@ pub(crate) const MUSIC: usize = 6;
 pub(crate) const FOCUS: usize = 7;
 pub(crate) const BELL: usize = 8;
 pub(crate) const PET: usize = 9;
-const WIDTHS: [f32; 10] = [44.0,20.0,27.0,27.0,27.0,22.0,14.0,crate::focus_bar::WIDTH,20.0,32.0];
+pub(crate) const SALARY: usize = 10;
+pub(crate) const SALARY_WIDTH: f32 = 62.0;
+const SLOTS: usize = 11;
+const WIDTHS: [f32; SLOTS] = [44.0,20.0,27.0,27.0,27.0,22.0,14.0,crate::focus_bar::WIDTH,20.0,32.0,SALARY_WIDTH];
 
-pub(crate) const DEFAULT_ORDER: [usize;6]=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS];
+pub(crate) const DEFAULT_ORDER: [usize;7]=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS,SALARY];
 pub(crate) fn valid_order(order:&[usize])->bool {
-    order.len()==6 && DEFAULT_ORDER.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1)
+    order.len()==DEFAULT_ORDER.len() && DEFAULT_ORDER.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1)
+}
+/// 读取保存的排列；旧版没有工资组件的 6 项排列在末尾补上工资。
+pub(crate) fn migrate_order(mut order:Vec<usize>)->Option<Vec<usize>> {
+    if order.len()==DEFAULT_ORDER.len()-1 && !order.contains(&SALARY) {order.push(SALARY);}
+    valid_order(&order).then_some(order)
+}
+
+/// 收起状态要显示的组件。
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Parts {
+    pub battery: bool,
+    pub quotas: usize,
+    pub music: bool,
+    pub focus: bool,
+    pub bell: bool,
+    pub pet: bool,
+    pub salary: bool,
 }
 
 pub(crate) fn animations_enabled()->bool {
@@ -32,13 +52,14 @@ pub(crate) fn animations_enabled()->bool {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Layout {
     pub width: f32,
-    pub x: [Option<f32>; 10],
+    pub x: [Option<f32>; SLOTS],
 }
 
 impl Layout {
-    pub fn new(battery:bool,quotas:usize,music:bool,focus:bool,bell:bool,pet:bool)->Self {
+    pub fn new(parts:Parts)->Self {
+        let Parts{battery,quotas,music,focus,bell,pet,salary}=parts;
         fn place(cursor:&mut f32,width:f32)->f32 {let x=*cursor+width/2.0;*cursor+=width+12.0;x}
-        let mut x=[None;10];let mut cursor=16.0;
+        let mut x=[None;SLOTS];let mut cursor=16.0;
         let count=quotas.min(3);
         let order=if battery {[BATTERY,CLOCK,QUOTA]}else{[QUOTA,CLOCK,BATTERY]};
         for slot in order {
@@ -57,12 +78,23 @@ impl Layout {
                 _=>{},
             }
         }
-        for (slot,on) in [(MUSIC,music&&!bell),(FOCUS,focus),(BELL,bell)] {
+        for (slot,on) in [(MUSIC,music&&!bell),(FOCUS,focus),(SALARY,salary),(BELL,bell)] {
             if on {x[slot]=Some(place(&mut cursor,WIDTHS[slot]));}
         }
         let width=cursor-12.0+16.0;
         for value in x.iter_mut().flatten() {*value-=width/2.0;}
         Self {width:width.max(96.0),x}
+    }
+    /// 岛上实际使用的排布。工资组件优先级最低：最终宽度超过 `limit` 时让位，其他组件位置不变。
+    pub fn fitted(parts:Parts,order:&[usize],clock_extra:f32,limit:f32)->Self {
+        let build=|salary:bool|{
+            let mut layout=Self::new(Parts{salary,..parts});
+            layout.reorder(order);
+            if clock_extra>0.0 {layout.widen_clock(clock_extra);}
+            layout
+        };
+        let layout=build(parts.salary);
+        if parts.salary && layout.width>limit {build(false)}else{layout}
     }
     pub fn widen_clock(&mut self, extra:f32) {
         let clock=self.x[CLOCK].unwrap();
@@ -100,11 +132,11 @@ impl Layout {
 
 pub(crate) struct Motion {
     pub target: Layout,
-    positions: [Spring; 10],
+    positions: [Spring; SLOTS],
     initialized: bool,
 }
 impl Default for Motion {
-    fn default()->Self {Self {target:Layout::new(false,0,false,false,false,false),positions:[Spring::new(0.0,360.0,0.76);10],initialized:false}}
+    fn default()->Self {Self {target:Layout::new(Parts::default()),positions:[Spring::new(0.0,360.0,0.76);SLOTS],initialized:false}}
 }
 impl Motion {
     pub fn step(&mut self,target:Layout,dt:f32,animate:bool) {
@@ -128,56 +160,88 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn parts(battery:bool,quotas:usize,music:bool,focus:bool,bell:bool,pet:bool,salary:bool)->Parts {Parts{battery,quotas,music,focus,bell,pet,salary}}
+    fn boxes(layout:&Layout,clock_extra:f32)->Vec<(f32,f32)> {
+        let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|{
+            let width=WIDTHS[i]+if i==CLOCK {clock_extra}else{0.0};
+            (x-width/2.0,x+width/2.0)
+        })).collect();
+        boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
+        boxes
+    }
     #[test]
     fn clock_12h_keeps_components_separate_in_custom_orders(){
-        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]] {
-            for quotas in 0..=5 {
-                let mut layout=Layout::new(true,quotas,true,true,false,true);
+        for order in [DEFAULT_ORDER,[FOCUS,SALARY,MUSIC,QUOTA,CLOCK,PET,BATTERY]] {
+            for quotas in 0..=5 {for salary in [false,true] {
+                let mut layout=Layout::new(parts(true,quotas,true,true,false,true,salary));
                 layout.reorder(&order);layout.widen_clock(40.0);
-                let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|{
-                    let width=WIDTHS[i]+if i==CLOCK {40.0}else{0.0};
-                    (x-width/2.0,x+width/2.0)
-                })).collect();
-                boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
+                let boxes=boxes(&layout,40.0);
                 assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9));
                 assert!(boxes.first().unwrap().0>=-layout.width/2.0+15.9);
                 assert!(boxes.last().unwrap().1<=layout.width/2.0-15.9);
-            }
+            }}
         }
     }
     #[test]
     fn custom_order_preserves_groups_and_hidden_positions(){
-        assert!(!valid_order(&[0,0,2,6,7,9]));
+        assert!(!valid_order(&[0,0,2,6,7,9,10]));
         assert!(!valid_order(&[0,1,2]));
-        let order=[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY];
-        for battery in [false,true]{for count in 0..=5 {
-            let mut layout=Layout::new(battery,count,true,true,false,true);
+        assert!(!valid_order(&[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS]),"缺少工资组件的旧排列需要先迁移");
+        let order=[FOCUS,SALARY,MUSIC,QUOTA,CLOCK,PET,BATTERY];
+        for battery in [false,true]{for count in 0..=5 {for salary in [false,true] {
+            let mut layout=Layout::new(parts(battery,count,true,true,false,true,salary));
             let width=layout.width;layout.reorder(&order);
             assert_eq!(layout.width,width);
             let positions:Vec<_>=order.iter().filter_map(|i|layout.x[*i]).collect();
             assert!(positions.windows(2).all(|p|p[0]<p[1]));
             if count>1 {assert_eq!(layout.x[QUOTA+1].unwrap()-layout.x[QUOTA].unwrap(),34.0);}
-            let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|(x-WIDTHS[i]/2.0,x+WIDTHS[i]/2.0))).collect();
-            boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
-            assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9));
-        }}
+            assert!(boxes(&layout,0.0).windows(2).all(|p|p[1].0-p[0].1>=6.9));
+        }}}
+    }
+    #[test]
+    fn saved_orders_from_before_the_salary_component_gain_it_at_the_end(){
+        assert_eq!(migrate_order(vec![FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]),Some(vec![FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY,SALARY]));
+        assert_eq!(migrate_order(vec![SALARY,FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]),Some(vec![SALARY,FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]));
+        assert_eq!(migrate_order(vec![FOCUS,FOCUS,QUOTA,CLOCK,PET,BATTERY]),None);
+        assert_eq!(migrate_order(vec![FOCUS,SALARY,QUOTA,CLOCK,PET,BATTERY]),None);
+        assert_eq!(migrate_order(vec![]),None);
     }
     #[test]
     fn every_component_combination_fits_without_overlaps(){
-        for quotas in 0..=8 {for battery in [false,true] {for music in [false,true] {for focus in [false,true] {for bell in [false,true] {for pet in [false,true] {
-            let layout=Layout::new(battery,quotas,music,focus,bell,pet);
-            let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|(x-WIDTHS[i]/2.0,x+WIDTHS[i]/2.0))).collect();
-            boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
+        for quotas in 0..=8 {for battery in [false,true] {for music in [false,true] {for focus in [false,true] {for bell in [false,true] {for pet in [false,true] {for salary in [false,true] {
+            let wanted=parts(battery,quotas,music,focus,bell,pet,salary);
+            let layout=Layout::fitted(wanted,&[],0.0,crate::app::PW);
+            let boxes=boxes(&layout,0.0);
             assert!(layout.width<=crate::app::PW);
             assert!(boxes.first().unwrap().0>=-layout.width/2.0+15.9);
             assert!(boxes.last().unwrap().1<=layout.width/2.0-15.9);
             assert!(boxes.windows(2).all(|pair|pair[1].0-pair[0].1>=6.9),"组件不能挤在一起：{layout:?}");
             assert_eq!(layout.clearance(CLOCK),1.0);
-        }}}}}}
+            if salary && layout.x[SALARY].is_none() {
+                assert!(Layout::new(wanted).width>crate::app::PW,"放得下时不能让掉工资组件");
+                assert_eq!(layout.x,Layout::new(Parts{salary:false,..wanted}).x,"工资组件让位后其他组件保持原位");
+            }
+            if salary && quotas==0 {assert!(layout.x[SALARY].is_some(),"常见组合必须能显示工资：{wanted:?}");}
+        }}}}}}}
+    }
+    #[test]
+    fn salary_yields_when_the_12_hour_clock_needs_the_room(){
+        for quotas in 0..=8 {for battery in [false,true] {for music in [false,true] {for focus in [false,true] {for pet in [false,true] {
+            let wanted=parts(battery,quotas,music,focus,false,pet,true);
+            let layout=Layout::fitted(wanted,&[],40.0,crate::app::PW);
+            let mut full=Layout::new(wanted);full.widen_clock(40.0);
+            let mut without=Layout::new(Parts{salary:false,..wanted});without.widen_clock(40.0);
+            if full.width<=crate::app::PW {assert_eq!(layout.x,full.x,"放得下时保留工资组件");}
+            else {assert_eq!(layout.x,without.x,"加宽时钟后放不下时让掉工资组件：{wanted:?}");}
+        }}}}}
+        // 4 个圆环 + 音乐：24 小时制放得下，12 小时制时钟加宽后放不下。
+        let wanted=parts(true,4,true,false,false,true,true);
+        assert!(Layout::fitted(wanted,&[],0.0,crate::app::PW).x[SALARY].is_some());
+        assert!(Layout::fitted(wanted,&[],40.0,crate::app::PW).x[SALARY].is_none());
     }
     #[test]
     fn replacing_battery_moves_continuously_and_supports_an_instant_state(){
-        let before=Layout::new(true,1,true,false,false,true);let after=Layout::new(false,1,true,false,false,true);
+        let before=Layout::new(parts(true,1,true,false,false,true,false));let after=Layout::new(parts(false,1,true,false,false,true,false));
         let mut motion=Motion::default();motion.step(before,0.0,true);
         motion.step(after,1.0/60.0,true);let mid=motion.current().x[QUOTA].unwrap();
         assert!(mid<before.x[QUOTA].unwrap()&&mid>after.x[QUOTA].unwrap());

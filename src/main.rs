@@ -174,7 +174,7 @@ impl Shell {
     }
 
     fn env(&mut self, ctx: &egui::Context) -> Env {
-        let (clock, today, date) = local_now();
+        let (clock, clock_ms, today, date) = local_now();
         // 电量变化很慢，每 5 秒读一次就够
         if self.sys.2.ready(Duration::from_secs(5)) {
             let (b, c) = read_power();
@@ -190,6 +190,7 @@ impl Shell {
         Env {
             t: self.t0.elapsed().as_secs_f64(),
             clock,
+            clock_ms,
             today,
             date,
             battery: self.sys.0,
@@ -478,22 +479,24 @@ mod repaint_tests {
 }
 
 #[cfg(windows)]
-fn local_now() -> (String, String, String) {
+fn local_now() -> (String, u16, String, String) {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     let st = unsafe { GetLocalTime() };
     let wd = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
     (
         format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond),
+        st.wMilliseconds.min(999),
         format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay),
         format!("{}月{}日 {}", st.wMonth, st.wDay, wd[(st.wDayOfWeek as usize).min(6)]),
     )
 }
 
 #[cfg(not(windows))]
-fn local_now() -> (String, String, String) {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+fn local_now() -> (String, u16, String, String) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs();
     let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
-    (format!("{h:02}:{m:02}:{s:02}"), "1970-01-01".into(), "1月1日 周四".into())
+    (format!("{h:02}:{m:02}:{s:02}"), now.subsec_millis() as u16, "1970-01-01".into(), "1月1日 周四".into())
 }
 
 #[cfg(windows)]
