@@ -62,6 +62,9 @@ const PAGE_SLIDE: f32 = 46.0;
 #[path = "app_mail_tests.rs"]
 mod mail_regressions;
 
+#[path = "mail_preview.rs"]
+mod mail_preview;
+
 pub struct Options {
     /// 是否联网查歌词（录制/测试时关掉）。
     pub fetch_lyrics: bool,
@@ -202,6 +205,7 @@ pub(crate) struct LyricsState {
 /// v0.5.5：邮件面板与设置表单的界面状态。正文只在内存里过一次，不落盘。
 #[derive(Default)]
 pub(crate) struct MailState {
+    pub preview: Option<mail_preview::Preview>,
     pub digests: crate::mail_digest::Digests,
     pub privacy:crate::mail_privacy::Privacy,
     pub invitations: mail::invites::Invitations,
@@ -570,12 +574,19 @@ impl App {
         safe
     }
 
+    /// 使用当前帧时间消费邮件，避免暂停恢复时沿用上一帧的过期时钟。
+    pub fn mail_event_at(&mut self, ev: mail::Event, now: f64) {
+        self.t=now;
+        self.mail_event(ev);
+    }
+
     /// 收信服务推来的事件；历史邮件静默，新邮件进入通知队列。
     pub fn mail_event(&mut self, ev: mail::Event) {
         let watching=|email:&str|self.settings.mail_enabled && self.mail.accounts.iter().any(|a|a.enabled && a.email.eq_ignore_ascii_case(email));
         match ev {
             mail::Event::MailboxReset { account } => {
                 if !watching(&account) {return;}
+                if self.mail.preview.as_ref().is_some_and(|p|p.item.account.eq_ignore_ascii_case(&account)) {self.end_mail_preview(true);}
                 self.mail.recent.retain(|item| !item.account.eq_ignore_ascii_case(&account));
                 self.mail.invitations.reset(&account);
                 self.mail.digests.reset(&account);
@@ -590,6 +601,7 @@ impl App {
             }
             mail::Event::Mail { mut item, new, updates } => {
                 if !watching(&item.account){return;}
+                let first_delivery=!self.mail.recent.iter().any(|m|m.uid==item.uid && m.account.eq_ignore_ascii_case(&item.account));
                 if !updates.is_empty() {
                     self.mail.invitations.observe(&item.account, item.uid, updates);
                     for item in &mut self.mail.recent {self.mail.invitations.reconcile(item);}
@@ -606,6 +618,9 @@ impl App {
                 self.mail.invitations.retain(&self.mail.recent);
                 self.mail.digests.retain(self.mail.recent.iter().chain(self.mail.reading.as_ref()));
                 self.mail.privacy.retain(&self.mail.recent);
+                if new && first_delivery {
+                    self.start_mail_preview(self.mail.recent[0].clone());
+                }
                 if new && self.settings.mail_enabled {
                     let item=&self.mail.recent[0];
                     let body=format!("{} · {}",item.from,item.subject);
@@ -985,6 +1000,7 @@ impl App {
     }
 
     pub fn show_page(&mut self,page:usize) {
+        self.end_mail_preview(false);
         if !self.settings.visible_pages[page] {
             self.settings_tab=PAGE_SETTINGS_TABS[page];
             self.open_settings();
@@ -997,6 +1013,7 @@ impl App {
         self.w.target=PW;self.h.target=self.expanded_height();
     }
     pub fn open_settings(&mut self){
+        self.end_mail_preview(true);
         self.settings_open=true;
         self.settings_focus_requested=true;
     }
@@ -1042,6 +1059,7 @@ impl App {
 
     /// 带过渡地切到某页。`dir` > 0 表示内容从右侧进入。
     pub(crate) fn go(&mut self, page: usize, dir: f32) {
+        self.end_mail_preview(false);
         if page == self.page || !self.settings.visible_pages[page] { return; }
         self.subpage=None;
         // 连点：上一段过渡还没结束时，以当前页为起点重新开始，位移速度保留。
@@ -1199,6 +1217,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
+        if self.mail.preview.is_some() {return mail_preview::HEIGHT;}
         if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
@@ -1229,6 +1248,8 @@ impl App {
             self.forced_open_until=0.0;
         }
         self.browser_minimal_active=browser_minimal;
+        self.tick_mail_preview();
+        if self.mail.preview.is_some() && ctx.input(|i|i.key_pressed(egui::Key::Escape)) {self.end_mail_preview(true);}
         if !self.started {
             self.started = true;
             self.last_input = env.t;
@@ -1279,6 +1300,7 @@ impl App {
                 i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>(),
             )
         });
+        if hovering_files {self.end_mail_preview(false);}
         if !dropped.is_empty() && self.settings.visible_pages[3] {
             self.on_drop(dropped);
             self.show_page(3);
@@ -1314,7 +1336,7 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
-        if !self.is_editing() && inside && self.open && self.reveal > 0.95 {
+        if self.mail.preview.is_none() && !self.is_editing() && inside && self.open && self.reveal > 0.95 {
             let (scroll, left, right, esc) = ctx.input(|i| (i.raw_scroll_delta.y, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
             if esc { self.hover_lock = true; }
             if left || right {
@@ -1360,7 +1382,7 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
+        let want = self.mail.preview.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
         // 悬停在收起的工资金额上展开时，直接打开工资页。
         let salary_hover=!self.open && self.salary_bar_visible()
             && env.cursor.is_some_and(|c|(c.x-(cx+self.resident.position(bar::SALARY))).abs()<=bar::SALARY_WIDTH/2.0+6.0 && c.y-top<=BAR_H+4.0);
@@ -1513,6 +1535,7 @@ impl App {
         let mut repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
         // 上班中金额可见时，对齐系统时钟的下一次跳秒，保证金额每秒都更新。
         if let Some(wait)=self.salary_next_tick(salary_visible) {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64(wait));}
+        if let Some(preview)=&self.mail.preview {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64((preview.until-self.t).max(0.0)));}
         cmds.append(&mut self.pending);
         FrameOut {
             region: rel(floating_toast.map_or(region,|toast|region.union(toast)).intersect(ui.max_rect())),
@@ -1744,6 +1767,7 @@ impl App {
     // 面板主体：页标题 + 页面（带切页过渡）+ 翻页箭头 + 页码豆
     // ---------------------------------------------------------------
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
+        if self.draw_mail_preview(c,cmds) {return;}
         let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(format!("打开{}设置窗口",PAGE_NAMES[self.page]));
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));

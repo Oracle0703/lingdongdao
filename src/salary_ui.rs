@@ -314,7 +314,7 @@ impl App {
         let ctx = ui.ctx().clone();
         let dim = color(&ctx, Color32::from_gray(180), Color32::from_gray(75));
         let error_ink = color(&ctx, Color32::from_rgb(255, 130, 120), Color32::from_rgb(190, 45, 35));
-        ui.label(RichText::new("按月薪和作息实时计算今天赚了多少钱。数据只保存在本机，不会上传。").size(12.0).color(dim));
+        ui.label(RichText::new("按月薪与作息估算收入，数据仅保存在本机。").size(12.0).color(dim));
         settings_label(ui, "显示");
         settings_card(ui, |ui| {
             let mut visible = self.settings.visible_pages[SALARY_PAGE];
@@ -325,72 +325,87 @@ impl App {
             ui.add_space(4.0);
             ui.label(RichText::new(format!("工资配置读取失败，已禁止覆盖保存：{error}")).size(12.0).color(error_ink));
         }
-        settings_label(ui, "薪资与作息");
+        settings_label(ui, "月薪");
         let today = chrono::NaiveDate::parse_from_str(&self.today, "%Y-%m-%d").unwrap_or_else(|_| chrono::Local::now().date_naive());
         let state = &mut self.salary;
         let draft = state.draft.get_or_insert_with(|| Draft::new(&state.config));
+        let previous = draft.config.clone();
         settings_card(ui, |ui| {
-            let label = 72.0;
-            settings_control_row(ui, "月薪", label, |ui| {
+            settings_control_row(ui, "金额", 64.0, |ui| {
                 let field = ui.add_sized([150.0, 30.0], egui::TextEdit::singleline(&mut MoneyInput(&mut draft.monthly)).vertical_align(egui::Align::Center).hint_text("例如 10000"));
                 ui.label("元");
                 field
             });
             draft.config.monthly_cents = salary::parse_cents(&draft.monthly).unwrap_or(0);
-            ui.label(RichText::new("税前、到手均可，只用于本机计算。").size(11.5).color(dim));
-            ui.add_space(4.0);
+            ui.label(RichText::new("税前或到手均可，按你填写的金额计算。").size(11.5).color(dim));
+        });
+        settings_label(ui, "工作安排");
+        settings_card(ui, |ui| {
+            let label = 64.0;
             settings_control_row(ui, "上班日", label, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for (i, name) in ["一", "二", "三", "四", "五", "六", "日"].into_iter().enumerate() {
                         let on = draft.config.workdays[i];
                         let button = egui::Button::new(RichText::new(name).size(12.0).color(if on { Color32::WHITE } else { color(&ctx, Color32::from_gray(170), Color32::from_gray(90)) }))
-                            .fill(if on { color(&ctx, Color32::from_rgb(45, 105, 175), Color32::from_rgb(58, 128, 228)) } else { color(&ctx, Color32::from_rgb(28, 28, 30), Color32::from_rgb(236, 239, 244)) })
+                            .fill(if on { Color32::from_rgb(53,112,218) } else { color(&ctx, Color32::from_rgb(43,49,61), Color32::from_rgb(240,244,250)) })
                             .stroke(egui::Stroke::NONE).corner_radius(6.0);
-                        if ui.add_sized([30.0, 26.0], button).on_hover_text(format!("周{name}")).clicked() { draft.config.workdays[i] = !on; }
+                        if ui.add_sized([30.0, 30.0], button).on_hover_text(format!("周{name}")).clicked() { draft.config.workdays[i] = !on; }
                     }
                 }).response
             });
-            settings_control_row(ui, "上班时间", label, |ui| ui.horizontal(|ui| {
-                time_picker(ui, "salary-start", &mut draft.config.start);
-                ui.label("至");
-                time_picker(ui, "salary-end", &mut draft.config.end);
-            }).response);
+            time_range(ui, "上班时间", "salary-work", &mut draft.config.start, &mut draft.config.end);
             ui.separator();
             setting_row(ui, "午休不计薪", "午休期间金额暂停增长", &mut draft.config.lunch);
             ui.add_enabled_ui(draft.config.lunch, |ui| {
-                settings_control_row(ui, "午休时间", label, |ui| ui.horizontal(|ui| {
-                    time_picker(ui, "salary-lunch-start", &mut draft.config.lunch_start);
-                    ui.label("至");
-                    time_picker(ui, "salary-lunch-end", &mut draft.config.lunch_end);
-                }).response);
+                time_range(ui, "午休时间", "salary-lunch", &mut draft.config.lunch_start, &mut draft.config.lunch_end);
             });
-            ui.separator();
-            setting_row(ui, "收起时显示金额", "关闭后只在工资页显示；屏幕顶部的金额别人路过也能看到", &mut draft.config.island);
             ui.add_space(4.0);
             let preview = match draft.config.validate() {
                 Ok(()) => {
                     let s = salary::snapshot(&draft.config, today, 0);
                     let paid = salary::paid_seconds(&draft.config, 24 * 3600).div_ceil(60);
                     let hours = if paid % 60 == 0 { format!("{} 小时", paid / 60) } else { format!("{} 小时 {} 分", paid / 60, paid % 60) };
-                    format!("本月 {} 个工作日 · 每天 {hours} · 日薪 ¥{} · 每秒 ¥{}", s.workdays, salary::format(s.daily, 2, true), salary::format(s.rate, 4, false))
+                    format!("本月 {} 个工作日 · 每天 {hours}\n日薪 ¥{} · 每秒 ¥{}", s.workdays, salary::format(s.daily, 2, true), salary::format(s.rate, 4, false))
                 }
                 Err(message) => message.to_string(),
             };
-            ui.label(RichText::new(preview).size(12.0).color(dim));
+            egui::Frame::new().fill(color(&ctx,Color32::from_rgb(29,44,65),Color32::from_rgb(239,245,255)))
+                .corner_radius(8.0).inner_margin(10).show(ui,|ui|{
+                    ui.set_min_width(ui.available_width());
+                    ui.label(RichText::new(preview).size(12.0).color(dim));
+                });
         });
-        let dirty = draft.config != state.config;
-        let mut save = false;
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            save = ui.button("保存").clicked();
-            if dirty { ui.label(RichText::new("有未保存的修改").size(12.0).color(dim)); }
+        settings_label(ui, "岛上显示");
+        settings_card(ui, |ui| {
+            setting_row(ui, "收起时显示金额", "关闭后仅在工资页查看；开启时路过的人也能看到金额", &mut draft.config.island);
         });
-        if save { self.save_salary(); }
-        let state = &self.salary;
-        if !state.note.is_empty() {
-            ui.add_space(3.0);
-            ui.label(RichText::new(&state.note).size(12.0).color(if state.note_error { error_ink } else { dim }));
+        if draft.config != previous {
+            state.note.clear();
+            state.note_error = false;
+        }
+        ui.add_space(8.0);
+    }
+
+    /// 放在滚动区之外：小窗口和表单末尾都能保存，并看见校验结果。
+    pub(crate) fn salary_settings_actions(&mut self, ui:&mut egui::Ui) {
+        let dirty=self.salary.draft.as_ref().is_some_and(|draft|draft.config!=self.salary.config);
+        let ctx=ui.ctx().clone();
+        ui.separator();
+        let save=ui.horizontal(|ui|{
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                let clicked=ui.add_sized([104.0,32.0],egui::Button::new(RichText::new("保存修改").color(Color32::WHITE))
+                    .fill(Color32::from_rgb(53,112,218)).stroke(egui::Stroke::NONE).corner_radius(8.0)).clicked();
+                ui.label(RichText::new(if dirty{"有未保存的修改"}else{"薪资与作息保存后生效"}).size(12.0)
+                    .color(color(&ctx,Color32::from_rgb(169,183,205),Color32::from_rgb(101,118,143))));
+                clicked
+            }).inner
+        }).inner;
+        if save {self.save_salary();}
+        if !self.salary.note.is_empty() {
+            ui.label(RichText::new(&self.salary.note).size(12.0).color(if self.salary.note_error {
+                color(&ctx,Color32::from_rgb(255,150,150),Color32::from_rgb(190,49,62))
+            }else{color(&ctx,Color32::from_rgb(130,211,172),Color32::from_rgb(30,126,86))}));
         }
     }
 
@@ -411,16 +426,29 @@ impl App {
     }
 }
 
-fn time_picker(ui: &mut egui::Ui, id: &str, minutes: &mut u16) {
+fn time_range(ui:&mut egui::Ui,title:&str,id:&str,start:&mut u16,end:&mut u16) {
+    ui.scope(|ui|{
+        ui.spacing_mut().interact_size.y=30.0;
+        settings_control_row(ui,title,64.0,|ui|{
+            ui.spacing_mut().item_spacing.x=4.0;
+            time_picker(ui,(id,"start"),start);
+            ui.label("至");
+            time_picker(ui,(id,"end"),end)
+        });
+    });
+}
+
+fn time_picker(ui: &mut egui::Ui, id: (&str,&str), minutes: &mut u16) -> egui::Response {
     let (mut hour, mut minute) = (*minutes / 60, *minutes % 60);
-    egui::ComboBox::from_id_salt((id, "hour")).width(48.0).selected_text(format!("{hour:02}")).show_ui(ui, |ui| {
+    let hours=egui::ComboBox::from_id_salt((id, "hour")).width(42.0).selected_text(format!("{hour:02}")).show_ui(ui, |ui| {
         for value in 0..24u16 { ui.selectable_value(&mut hour, value, format!("{value:02}")); }
     });
     ui.label(":");
-    egui::ComboBox::from_id_salt((id, "minute")).width(48.0).selected_text(format!("{minute:02}")).show_ui(ui, |ui| {
+    let minutes_response=egui::ComboBox::from_id_salt((id, "minute")).width(42.0).selected_text(format!("{minute:02}")).show_ui(ui, |ui| {
         for value in (0..60u16).step_by(5) { ui.selectable_value(&mut minute, value, format!("{value:02}")); }
     });
     *minutes = hour * 60 + minute;
+    hours.response.union(minutes_response.response)
 }
 
 #[cfg(test)]
