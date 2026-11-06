@@ -1020,6 +1020,7 @@ mod tests {
 
     #[test]
     fn execution_reads_saved_disabled_config_without_loading_any_credentials() {
+        let _env = crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         struct Restore(Option<std::ffi::OsString>);
         impl Drop for Restore {
             fn drop(&mut self) {

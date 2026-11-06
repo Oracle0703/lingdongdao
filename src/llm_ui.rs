@@ -264,6 +264,7 @@ mod tests {
 
     #[test]
     fn saving_digest_settings_notifies_only_after_config_is_committed() {
+        let _env = crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         struct DataDirectory {
             previous: Option<std::ffi::OsString>,
             path: std::path::PathBuf,

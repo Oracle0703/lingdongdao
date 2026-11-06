@@ -290,6 +290,7 @@ mod tests {
     }
     #[test]
     fn quota_save_failure_preserves_existing_accounts_and_reports_error(){
+        let _env=crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir=std::env::temp_dir().join(format!("quota-save-failure-{}",std::process::id()));
         std::fs::create_dir_all(dir.join("ai-quota.json")).unwrap();
         let previous_env=std::env::var_os("DAOZAI_DATA_DIR");std::env::set_var("DAOZAI_DATA_DIR",&dir);

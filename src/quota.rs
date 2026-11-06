@@ -303,6 +303,7 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     use super::*;
     #[test]
     fn unreadable_quota_config_cannot_overwrite_recovered_data(){
+        let _env=crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir=std::env::temp_dir().join(format!("quota-load-protection-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
         let previous=std::env::var_os("DAOZAI_DATA_DIR");std::env::set_var("DAOZAI_DATA_DIR",&dir);
         let path=dir.join("ai-quota.json");
