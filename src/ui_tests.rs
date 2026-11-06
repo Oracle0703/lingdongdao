@@ -299,6 +299,9 @@ fn quality_removed_mail_accounts_ignore_in_flight_results() {
     assert!(h.app.notification_bell_until<=h.t);
 }
 
+#[path = "mail_preview_ui_tests.rs"]
+mod mail_preview_tests;
+
 struct H {
     ctx: egui::Context,
     app: App,
@@ -3641,7 +3644,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
                 viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()};
             *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
         });
-        for tab in 0..12 {
+        for tab in 0..14 {
             h.app.settings_tab=tab;
             for frame in 0..3 {
                 h.ctx.data_mut(|d|d.insert_temp(egui::Id::new("settings-system-theme"),(std::time::Instant::now(),system)));
@@ -3658,6 +3661,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
                         7=>&[("验证码隐藏","60 秒"),("检查间隔","120 秒"),("会议提前","15 分钟"),("邮箱","输入邮箱地址"),("授权码","输入邮箱授权码")],
                         8=>&[("用户名","输入用户名或粘贴账号信息"),("密码","输入平台生成的密码")],
                         11=>&[("服务","Codex"),("备注","例如：个人、工作、备用"),("选择该账号的登录文件","选择…")],
+                        13=>&[("上班时间","09"),("上班时间","18"),("午休时间","12"),("午休时间","13")],
                         _=>&[],
                     };
                     for (label,value) in pairs {
@@ -3674,7 +3678,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
                         for choice in choices {assert!((center(label)-center(choice)).abs()<1.0,"{label}与{choice}应垂直居中：{} / {}",center(label),center(choice));}
                     }
                 }
-                let background=if dark{egui::Color32::from_rgb(25,25,27)}else{egui::Color32::from_rgb(246,247,249)};
+                let background=if dark{egui::Color32::from_rgb(23,27,35)}else{egui::Color32::from_rgb(248,250,253)};
                 assert!(child.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(r) if r.fill==background && r.rect.width()>400.0)));
                 raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);
                 if frame==2 {
@@ -4832,6 +4836,54 @@ fn salary_settings_gallery(){
             let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
             image::save_buffer(dest.join("settings.png"),&rgba,690,700,image::ColorType::Rgba8).unwrap();
         }
+    }
+}
+
+#[test]
+fn salary_settings_save_and_errors_remain_visible_without_scrolling() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    fn frame(h:&mut H,size:Vec2,events:Vec<egui::Event>)->Vec<egui::epaint::ClippedShape> {
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+            let id=viewport.ids.this;
+            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),focused:true,events:events.clone(),
+                viewports:std::iter::once((id,egui::ViewportInfo{focused:Some(true),..Default::default()})).collect(),..Default::default()};
+            *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+        });
+        let _=h.ctx.run(egui::RawInput::default(),|ctx|h.app.settings_ui(ctx,false));
+        let shapes=output.lock().unwrap().take().unwrap().shapes;shapes
+    }
+    fn visible_text(shapes:&[egui::epaint::ClippedShape],text:&str,size:Vec2)->Rect {
+        let (rect,clip)=shapes.iter().find_map(|shape|match &shape.shape {
+            egui::Shape::Text(t) if t.galley.text()==text=>Some((t.visual_bounding_rect(),shape.clip_rect)),_=>None,
+        }).unwrap_or_else(||panic!("缺少 {text}"));
+        assert!(Rect::from_min_size(Pos2::ZERO,size).contains_rect(rect)&&clip.expand(1.0).contains_rect(rect),"{text} 被裁剪：{rect:?} / {clip:?}");rect
+    }
+    fn click(h:&mut H,size:Vec2,pos:Pos2) {
+        frame(h,size,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
+        frame(h,size,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);
+    }
+    for size in [egui::vec2(600.0,450.0),egui::vec2(760.0,640.0)] {
+        let mut h=H::new();h.app.settings_tab=crate::salary_ui::SETTINGS_TAB;h.app.open_settings();h.ctx.set_embed_viewports(false);
+        h.app.salary.config=crate::salary::Config{monthly_cents:1_000_000,..Default::default()};
+        for _ in 0..4 {frame(&mut h,size,vec![]);}
+        let shapes=frame(&mut h,size,vec![]);
+        let save=visible_text(&shapes,"保存修改",size).center();
+        click(&mut h,size,save);
+        visible_text(&frame(&mut h,size,vec![]),"已保存",size);
+        assert_eq!(crate::salary::Config::load().monthly_cents,1_000_000);
+        let field=visible_text(&frame(&mut h,size,vec![]),"10000",size).center();
+        click(&mut h,size,field);
+        frame(&mut h,size,vec![egui::Event::Key{key:egui::Key::A,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers{ctrl:true,command:true,..Default::default()}}]);
+        frame(&mut h,size,vec![egui::Event::Text("0".into())]);
+        click(&mut h,size,save);
+        visible_text(&frame(&mut h,size,vec![]),"请填写月薪",size);
+        assert_eq!(crate::salary::Config::load().monthly_cents,1_000_000,"非法输入不能覆盖已保存配置");
+        frame(&mut h,size,vec![egui::Event::PointerMoved(egui::pos2(size.x-40.0,180.0)),egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:egui::vec2(0.0,-1000.0),modifiers:Default::default()}]);
+        for _ in 0..10 {frame(&mut h,size,vec![]);}
+        let scrolled=frame(&mut h,size,vec![]);
+        assert!(visible_text(&scrolled,"保存修改",size).center().distance(save)<1.0,"滚动后保存位置不能移动");
+        visible_text(&scrolled,"请填写月薪",size);
     }
 }
 

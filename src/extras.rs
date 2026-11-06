@@ -727,7 +727,7 @@ impl App {
 fn switch(ui:&mut egui::Ui,value:&mut bool)->bool {
     let (rect,response)=ui.allocate_exact_size(egui::vec2(34.0,20.0),egui::Sense::click());
     if response.clicked(){*value=!*value;}
-    let fill=if *value{Color32::from_rgb(48,184,92)}else{Color32::from_rgb(82,82,87)};
+    let fill=if *value{Color32::from_rgb(53,112,218)}else{settings_color(ui.ctx(),Color32::from_rgb(81,90,106),Color32::from_rgb(180,190,205))};
     ui.painter().rect_filled(rect,10.0,fill);
     let x=if *value{rect.right()-10.0}else{rect.left()+10.0};
     ui.painter().circle_filled(egui::pos2(x,rect.center().y+0.5),7.5,Color32::from_black_alpha(35));
@@ -737,24 +737,26 @@ fn switch(ui:&mut egui::Ui,value:&mut bool)->bool {
 pub(crate) fn setting_row(ui:&mut egui::Ui,title:&str,description:&str,value:&mut bool){
     let ctx=&ui.ctx().clone();
     ui.horizontal(|ui|{
-        ui.vertical(|ui|{
-            ui.set_min_width((ui.available_width()-42.0).max(100.0));
+        let text_width=(ui.available_width()-42.0).max(100.0);
+        ui.allocate_ui_with_layout(egui::vec2(text_width,30.0),egui::Layout::top_down(egui::Align::Min),|ui|{
+            ui.set_width(text_width);
             ui.label(egui::RichText::new(title).size(13.0).color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
-            if !description.is_empty(){ui.label(egui::RichText::new(description).size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));}
+            if !description.is_empty(){ui.label(egui::RichText::new(description).size(11.5).color(settings_color(ctx,Color32::from_rgb(160,172,192),Color32::from_rgb(111,123,143))));}
         });
         switch(ui,value);
     });
 }
 pub(crate) fn settings_card(ui:&mut egui::Ui,add:impl FnOnce(&mut egui::Ui)) {
     let ctx=&ui.ctx().clone();
-    egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(35,35,38),Color32::from_rgb(255,255,255)))
-        .corner_radius(10.0).inner_margin(egui::Margin::symmetric(14,10))
+    egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(34,39,49),Color32::WHITE))
+        .stroke(egui::Stroke::new(1.0,settings_color(ctx,Color32::from_rgb(52,60,74),Color32::from_rgb(227,232,240))))
+        .corner_radius(12.0).inner_margin(egui::Margin::symmetric(14,12))
         .show(ui,|ui|{ui.set_min_width(ui.available_width());add(ui);});
 }
 pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
     let ctx=&ui.ctx().clone();
     ui.add_space(9.0);
-    ui.label(egui::RichText::new(text).size(11.5).color(settings_color(ctx,Color32::from_gray(185),Color32::from_gray(70))));
+    ui.label(egui::RichText::new(text).size(12.0).strong().color(settings_color(ctx,Color32::from_rgb(181,193,213),Color32::from_rgb(91,108,133))));
     ui.add_space(2.0);
 }
 pub(crate) fn settings_control_row(ui:&mut egui::Ui,title:&str,label_width:f32,controls:impl FnOnce(&mut egui::Ui)->egui::Response)->egui::Response{
@@ -829,11 +831,11 @@ impl App {
         if !self.settings_open{return;}
         let id=egui::ViewportId::from_hash_of("daozai-settings");
         let focus_requested=std::mem::take(&mut self.settings_focus_requested);
-        ctx.show_viewport_immediate(id,egui::ViewportBuilder::default().with_title("岛仔设置").with_icon(theme::app_icon()).with_inner_size([690.0,560.0]).with_min_inner_size([600.0,450.0]).with_visible(false).with_active(false).with_window_level(egui::WindowLevel::Normal),|ctx,_|{
+        ctx.show_viewport_immediate(id,egui::ViewportBuilder::default().with_title("岛仔设置").with_icon(theme::app_icon()).with_inner_size([760.0,640.0]).with_min_inner_size([600.0,450.0]).with_visible(false).with_active(false).with_window_level(egui::WindowLevel::Normal),|ctx,_|{
             let dark=self.settings.settings_theme.dark(crate::settings_theme::system_dark(ctx));
             let original_style=ctx.style();
             let mut style=(*original_style).clone();
-            style.visuals=if dark{egui::Visuals::dark()}else{egui::Visuals::light()};
+            crate::settings_theme::apply(&mut style,dark);
             ctx.set_style(style);
             ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if dark{egui::SystemTheme::Dark}else{egui::SystemTheme::Light}));
             if self.settings.settings_theme==crate::settings_theme::SettingsTheme::System {
@@ -848,7 +850,7 @@ impl App {
             if ctx.input(|i|i.viewport().close_requested()){self.settings_open=false;}
             let before=self.settings.clone();
             let mut music_source_choice=None;
-            egui::SidePanel::left("settings-sidebar").resizable(false).exact_width(180.0).frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(29,29,32),Color32::from_rgb(237,239,243))).stroke(egui::Stroke::new(1.0,settings_color(ctx,Color32::from_rgb(42,42,45),Color32::from_rgb(216,219,225)))).inner_margin(egui::Margin::symmetric(10,12))).show(ctx,|ui|{
+            egui::SidePanel::left("settings-sidebar").resizable(false).exact_width(172.0).frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(27,32,42),Color32::from_rgb(241,245,251))).inner_margin(egui::Margin::symmetric(10,12))).show(ctx,|ui|{
                 ui.add_space(5.0);
                 ui.label(egui::RichText::new("设置").size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105))));
                 ui.add_space(7.0);
@@ -858,7 +860,7 @@ impl App {
                     let (rect,response)=ui.allocate_exact_size(egui::vec2(ui.available_width(),36.0),egui::Sense::click());
                     if response.clicked() && !selected{self.settings_tab=start;}
                     if selected || response.hovered(){
-                        ui.painter().rect_filled(rect,7.0,if selected{settings_color(ctx,Color32::from_rgb(43,43,46),Color32::from_rgb(214,221,232))}else{settings_color(ctx,Color32::from_rgb(30,30,33),Color32::from_rgb(225,230,238))});
+                        ui.painter().rect_filled(rect,8.0,if selected{settings_color(ctx,Color32::from_rgb(39,58,87),Color32::from_rgb(221,233,252))}else{settings_color(ctx,Color32::from_rgb(35,43,56),Color32::from_rgb(231,238,248))});
                     }
                     let icon=match start {
                         0=>egui::include_image!("../assets/settings-icons/system/general.svg"),
@@ -871,26 +873,15 @@ impl App {
                         13=>egui::include_image!("../assets/settings-icons/system/salary.svg"),
                         _=>egui::include_image!("../assets/settings-icons/system/about.svg"),
                     };
-                    let icon_bg=egui::Rect::from_center_size(egui::pos2(rect.left()+21.0,rect.center().y),egui::vec2(25.0,25.0));
+                    let icon_bg=egui::Rect::from_center_size(egui::pos2(rect.left()+19.0,rect.center().y),egui::vec2(22.0,22.0));
                     egui::Image::new(icon).paint_at(ui,icon_bg);
-                    ui.painter().text(egui::pos2(rect.left()+40.0,rect.center().y),egui::Align2::LEFT_CENTER,name,egui::FontId::proportional(13.0),if selected{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))}else{settings_color(ctx,Color32::from_gray(225),Color32::from_gray(55))});
+                    ui.painter().text(egui::pos2(rect.left()+36.0,rect.center().y),egui::Align2::LEFT_CENTER,name,egui::FontId::proportional(12.0),if selected{settings_color(ctx,Color32::from_rgb(180,211,255),Color32::from_rgb(38,88,164))}else{settings_color(ctx,Color32::from_rgb(188,200,219),Color32::from_rgb(82,99,125))});
                     ui.add_space(3.0);
                 }
             });
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(25,25,27),Color32::from_rgb(246,247,249))).inner_margin(egui::Margin::symmetric(22,16))).show(ctx,|ui|{
-                ui.spacing_mut().item_spacing=egui::vec2(8.0,5.0);
-                ui.spacing_mut().button_padding=egui::vec2(10.0,6.0);
-                ui.style_mut().text_styles.insert(egui::TextStyle::Small,egui::FontId::proportional(12.0));
-                ui.visuals_mut().override_text_color=Some(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41)));
-                ui.visuals_mut().extreme_bg_color=settings_color(ctx,Color32::from_rgb(25,25,28),Color32::from_rgb(244,246,249));
-                ui.visuals_mut().widgets.inactive.bg_fill=settings_color(ctx,Color32::from_rgb(50,50,54),Color32::from_rgb(228,231,236));
-                ui.visuals_mut().widgets.hovered.bg_fill=settings_color(ctx,Color32::from_rgb(65,65,71),Color32::from_rgb(216,222,231));
-                ui.visuals_mut().widgets.inactive.corner_radius=egui::CornerRadius::same(6);
-                ui.visuals_mut().widgets.hovered.corner_radius=egui::CornerRadius::same(6);
-                ui.visuals_mut().widgets.active.corner_radius=egui::CornerRadius::same(6);
-                ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(23,27,35),Color32::from_rgb(248,250,253))).inner_margin(egui::Margin::symmetric(18,16))).show(ctx,|ui|{
                 let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","大模型","工资"];
-                ui.label(egui::RichText::new(titles[self.settings_tab.min(titles.len()-1)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                ui.label(egui::RichText::new(titles[self.settings_tab.min(titles.len()-1)]).size(21.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,42,62))));
                 if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
                     if start!=end {
                         ui.add_space(7.0);
@@ -909,7 +900,13 @@ impl App {
                     }
                 }
                 ui.add_space(6.0);
-                egui::ScrollArea::vertical().id_salt(("settings-scroll",self.settings_tab)).auto_shrink([false,false]).show(ui,|ui|{
+                if self.settings_tab==crate::salary_ui::SETTINGS_TAB {
+                    egui::TopBottomPanel::bottom("salary-settings-actions").resizable(false).exact_height(80.0)
+                        .frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(23,27,35),Color32::from_rgb(248,250,253))).inner_margin(egui::Margin::symmetric(0,10)))
+                        .show_inside(ui,|ui|self.salary_settings_actions(ui));
+                }
+                egui::ScrollArea::vertical().id_salt(("settings-scroll",self.settings_tab)).auto_shrink([false,false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui,|ui|{
                     match self.settings_tab {
                     11=>self.quota_settings(ui),
                     crate::salary_ui::SETTINGS_TAB=>self.salary_settings(ui),
@@ -1150,9 +1147,10 @@ impl App {
                             setting_row(ui,"验证码高亮","识别到验证码时在岛上放大显示，点击即复制",&mut self.settings.mail_code);
                             ui.separator();
                             setting_choices(ui,"验证码隐藏",&mut self.settings.mail_code_hide_seconds,[30,60,300],"秒");
-                            ui.label("默认 60 秒。明确有效时长更短时提前隐藏；历史邮件默认隐藏。隐藏不代表失效，主动查看后 15 秒再次隐藏。");
+                            ui.label("新邮件从岛仔首次收到起计时，默认 60 秒后隐藏；收信满 5 分钟或邮件注明的更短有效期已到时，自动隐藏。历史邮件默认隐藏，主动查看后 15 秒再次隐藏。隐藏不代表失效。");
+                            ui.label("新验证码会自动展开预览 30 秒，左侧点击复制、右侧查看正文简介；可提前关闭。正在编辑或打开设置时不打断操作。");
                             setting_choices(ui,"检查间隔",&mut self.settings.mail_interval,[60,120,300],"秒");
-                            ui.label(egui::RichText::new("支持推送时实时收信，并每 10 秒补查；以上间隔仅用于不支持推送的邮箱。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
+                            ui.label(egui::RichText::new("支持推送时实时收信，并每 10 秒补查；其他邮箱按以上间隔检查，连接中断后会自动补收。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
                             ui.separator();
                             setting_choices(ui,"会议提前",&mut self.settings.mail_ics,[5,15,30],"分钟");
                             ui.label(egui::RichText::new("根据邮件中的日历邀请提醒，与日程设置共用。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));

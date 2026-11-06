@@ -33,6 +33,119 @@ fn receive(app: &mut App, uid: u32, calendar: &str) {
 }
 
 #[test]
+fn new_code_after_a_long_frame_pause_gets_its_full_local_display_window() {
+    let mut fixture=Fixture::new();let app=&mut fixture.app;
+    app.settings.mail_code_hide_seconds=60;
+    app.t=1.0;
+    let item=mail::Item {
+        account:"test@example.com".into(),from:"测试".into(),subject:"验证码".into(),time:String::new(),
+        code:Some("123456".into()),received_unix:Some(chrono::Utc::now().timestamp()-120),
+        summary:"验证码 123456".into(),links:vec![],meeting:None,uid:1,
+    };
+    app.mail_event_at(mail::Event::Mail{item:item.clone(),new:true,updates:Vec::new()},300.0);
+    assert!(!app.mail_code_hidden(&item),"恢复后不能用暂停前的旧时钟开始计时");
+    app.t=359.9;assert!(!app.mail_code_hidden(&item));
+    app.t=360.0;assert!(app.mail_code_hidden(&item));
+    app.mail_event_at(mail::Event::Mail{item:item.clone(),new:true,updates:Vec::new()},370.0);
+    assert!(app.mail_code_hidden(&item),"重复事件不能延长显示窗口");
+}
+
+#[test]
+fn resumed_mail_backlog_keeps_old_codes_masked_until_manually_revealed() {
+    let mut fixture=Fixture::new();let app=&mut fixture.app;
+    app.settings.mail_code_hide_seconds=60;app.t=1.0;
+    let item=mail::Item {
+        account:"test@example.com".into(),from:"测试".into(),subject:"验证码 123456".into(),time:String::new(),
+        code:Some("123456".into()),received_unix:Some(chrono::Utc::now().timestamp()-7200),
+        summary:"验证码 123456".into(),links:vec![],meeting:None,uid:1,
+    };
+    app.mail_event_at(mail::Event::Mail{item:item.clone(),new:true,updates:Vec::new()},7200.0);
+    let visible=app.display_mail(&item);
+    assert!(visible.code.is_none()&&!visible.subject.contains("123456")&&!visible.summary.contains("123456"));
+    app.reveal_mail_code(&item);assert!(app.display_mail(&item).code.is_some());
+    app.t+=15.0;assert!(app.display_mail(&item).code.is_none());
+}
+
+fn preview_code(uid:u32)->mail::Item {
+    mail::Item{account:"test@example.com".into(),from:"测试服务".into(),subject:"登录验证".into(),time:"14:00".into(),
+        code:Some("482913".into()),received_unix:Some(chrono::Utc::now().timestamp()),
+        summary:"验证码：482913，请勿泄露给他人。".into(),links:vec![],meeting:None,uid}
+}
+fn preview_receive(app:&mut App,item:mail::Item,new:bool,at:f64) {
+    app.mail_event_at(mail::Event::Mail{item,new,updates:Vec::new()},at);
+}
+
+#[test]
+fn mail_preview_is_temporary_and_duplicate_delivery_does_not_extend_it() {
+    let mut fixture=Fixture::new();let app=&mut fixture.app;
+    app.settings.notifications=false;app.page=SALARY_PAGE;
+    let item=preview_code(1);preview_receive(app,item.clone(),true,100.0);
+    assert!(app.open&&app.mail.preview.is_some(),"验证码预览不依赖普通通知开关");
+    assert_eq!(app.page,SALARY_PAGE,"自动预览不能改掉用户上次看的页面");
+    preview_receive(app,item.clone(),true,110.0);
+    assert_eq!(app.mail.preview.as_ref().unwrap().until,130.0);
+    app.t=129.9;app.tick_mail_preview();assert!(app.open);
+    app.t=130.0;app.tick_mail_preview();
+    assert!(!app.open&&app.mail.preview.is_none()&&app.hover_lock);
+    assert_eq!(app.page,SALARY_PAGE);
+    assert!(!app.mail_code_hidden(&item),"30 秒收起预览不应改变原有验证码隐藏时长");
+}
+
+#[test]
+fn mail_preview_ignores_history_stale_codes_disabled_features_and_active_edits() {
+    for scenario in 0..10 {
+        let mut fixture=Fixture::new();let app=&mut fixture.app;
+        let mut item=preview_code(1);let mut new=true;
+        match scenario {
+            0=>new=false,
+            1=>item.code=None,
+            2=>item.received_unix=Some(chrono::Utc::now().timestamp()-7200),
+            3=>app.settings.mail_code=false,
+            4=>app.settings.visible_pages[5]=false,
+            5=>app.mail.accounts.clear(),
+            6=>{app.adding=true;app.buf="未保存草稿".into();},
+            7=>app.settings_open=true,
+            8=>app.drag_hot=true,
+            _=>{item.summary="验证码 482913 有效期为30秒".into();item.received_unix=Some(chrono::Utc::now().timestamp()-40);},
+        }
+        preview_receive(app,item,new,10.0);
+        assert!(app.mail.preview.is_none(),"不应弹出的场景 {scenario}");
+        if scenario==6 {assert_eq!(app.buf,"未保存草稿");assert!(app.adding);}
+    }
+}
+
+#[test]
+fn mail_preview_tracks_the_latest_code_across_accounts_and_ignores_ordinary_mail() {
+    let mut fixture=Fixture::new();let app=&mut fixture.app;
+    app.mail.accounts.push(mail::Account{email:"other@example.com".into(),provider:mail::Provider::Qq,custom:None,enabled:true});
+    let first=preview_code(1);preview_receive(app,first.clone(),true,1.0);
+    let mut second=preview_code(1);second.account="other@example.com".into();second.code=Some("975310".into());
+    preview_receive(app,second.clone(),true,10.0);
+    assert_eq!(app.mail.preview.as_ref().unwrap().until,40.0);
+    preview_receive(app,first,true,11.0);
+    let mut ordinary=preview_code(2);ordinary.code=None;preview_receive(app,ordinary,true,12.0);
+    let shown=&app.mail.preview.as_ref().unwrap().item;
+    assert_eq!(shown.account,second.account);assert_eq!(shown.code,second.code);
+    app.mail_event(mail::Event::MailboxReset{account:second.account});
+    assert!(app.mail.preview.is_none()&&!app.open);
+}
+
+#[test]
+fn mail_preview_respects_earlier_privacy_deadlines_and_disabling_accounts() {
+    for scenario in 0..4 {
+        let mut fixture=Fixture::new();let app=&mut fixture.app;
+        let mut item=preview_code(1);
+        if scenario==0 {app.settings.mail_code_hide_seconds=15;}
+        if scenario==1 {item.received_unix=Some(chrono::Utc::now().timestamp()-298);}
+        if scenario==2 {item.summary="验证码 482913 有效期为20秒".into();}
+        preview_receive(app,item,true,10.0);assert!(app.mail.preview.is_some());
+        app.t=match scenario{0=>25.0,1=>13.0,2=>30.0,_=>11.0};
+        if scenario==3 {app.mail.accounts[0].enabled=false;}
+        app.tick_mail_preview();assert!(app.mail.preview.is_none()&&!app.open);
+    }
+}
+
+#[test]
 fn cancellation_retracts_loaded_invitation_and_pending_visible_reminders() {
     let mut fixture = Fixture::new(); let app = &mut fixture.app;
     let request = invitation("REQUEST", 1, "DTSTART:20300102T100000Z", "");

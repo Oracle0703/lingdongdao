@@ -5,6 +5,8 @@ use crate::mail::Item;
 #[derive(Default)]
 pub(crate) struct Privacy { seen:HashMap<(String,u32,String),Seen>, revealed:HashMap<(String,u32,String),f64>, bodies:std::cell::RefCell<HashMap<(String,u32,String),(std::sync::Arc<str>,std::sync::Arc<str>)>> }
 struct Seen { at:f64, age:Option<u64>, new:bool, lifetime:Option<u64> }
+/// 自动展示的收信年龄上限；断线或睡眠后补收不能重新暴露旧验证码。
+const MAX_AUTO_AGE_SECONDS:u64=300;
 fn key(item:&Item)->(String,u32,String){(item.account.to_ascii_lowercase(),item.uid,item.code.clone().unwrap_or_default())}
 
 /// Accept only explicit relative durations in the same short sentence as the code.
@@ -69,8 +71,11 @@ impl Privacy {
         let Some(s)=self.seen.get(&k) else{return true;};
         if !s.new{return true;}
         let elapsed=(now-s.at).max(0.0);
-        let limit=(fallback.clamp(15,300) as u64).min(s.lifetime.unwrap_or(u64::MAX));
-        s.age.unwrap_or(0) as f64+elapsed>=limit as f64
+        // 自动隐藏是本机的展示时长，不能被轮询/投递延迟提前耗尽。
+        // 收信满 5 分钟或邮件明确的有效期已到时，自动展示必须结束。
+        elapsed>=fallback.clamp(15,300) as f64
+            || s.age.is_some_and(|age|age as f64+elapsed>=MAX_AUTO_AGE_SECONDS as f64)
+            || s.lifetime.is_some_and(|limit|s.age.unwrap_or(0) as f64+elapsed>=limit as f64)
     }
     pub fn reveal(&mut self,item:&Item,now:f64){self.revealed.insert(key(item),now+15.0);}
     pub fn retain(&mut self,items:&[Item]){
@@ -100,10 +105,54 @@ mod tests {
         let mut p=Privacy::default();p.observe(&i,false,0.0,100);assert!(p.hidden(&i,0.0,60));
     }
     #[test] fn fallback_is_configurable_and_masks_formatted_codes(){
-        let mut i=item();i.subject="验证码 123456".into();i.summary="no validity stated".into();i.received_unix=None;
-        let mut p=Privacy::default();p.observe(&i,true,0.0,100);
-        assert!(!p.hidden(&i,14.0,15));assert!(p.hidden(&i,15.0,15));
+        let mut i=item();i.subject="验证码 123456".into();i.summary="no validity stated".into();
+        for timestamp in [None,Some(0),Some(-1),Some(101)] {
+            i.received_unix=timestamp;
+            let mut p=Privacy::default();p.observe(&i,true,0.0,100);
+            assert!(!p.hidden(&i,14.0,15));assert!(p.hidden(&i,15.0,15));
+        }
         assert!(!mask("123456 and 1 2 3-4 5 6","123456").contains('1'));
+    }
+    #[test] fn polling_delay_does_not_consume_the_local_display_window(){
+        let mut i=item();i.subject="验证码".into();i.summary="验证码 123456".into();
+        for delay in [0,30,60,90,120,239] {
+            let mut p=Privacy::default();p.observe(&i,true,10.0,100+delay);
+            assert!(!p.hidden(&i,10.0,60),"同步延迟 {delay} 秒后，新邮件仍应获得本机显示时间");
+            assert!(!p.hidden(&i,69.9,60));assert!(p.hidden(&i,70.0,60));
+            p.observe(&i,true,90.0,200+delay);assert!(p.hidden(&i,90.0,60),"重连不能重新计时");
+        }
+        let mut history=Privacy::default();history.observe(&i,false,10.0,100);
+        assert!(history.hidden(&i,10.0,60));
+    }
+    #[test] fn stale_backlog_codes_never_get_an_automatic_display_window(){
+        let mut i=item();i.subject="验证码".into();i.summary="验证码 123456".into();
+        for age in [300,301,3600,14400] {
+            for fallback in [15,60,300] {
+                let mut p=Privacy::default();p.observe(&i,true,10.0,100+age);
+                assert!(p.hidden(&i,10.0,fallback),"积压 {age} 秒的验证码不能因补收而自动明文展示");
+                p.observe(&i,true,20.0,110+age);
+                assert!(p.hidden(&i,20.0,fallback),"重复交付不能重新开启旧验证码的显示窗口");
+            }
+        }
+    }
+    #[test] fn automatic_display_stops_at_the_server_age_cap(){
+        let mut i=item();i.subject="验证码".into();i.summary="验证码 123456".into();
+        let mut p=Privacy::default();p.observe(&i,true,10.0,399);
+        assert!(!p.hidden(&i,10.0,60));assert!(!p.hidden(&i,10.9,60));
+        assert!(p.hidden(&i,11.0,60),"即使本机显示窗口未结束，收信满 300 秒也必须自动隐藏");
+        i.subject="验证码 123456 有效期为10分钟".into();i.summary=i.subject.clone().into();
+        let mut p=Privacy::default();p.observe(&i,true,0.0,400);
+        assert!(p.hidden(&i,0.0,300),"更长的明确有效期不能放宽隐私上限");
+        p.reveal(&i,1.0);assert!(!p.hidden(&i,15.9,300));assert!(p.hidden(&i,16.0,300));
+        p.observe(&i,true,17.0,417);assert!(p.hidden(&i,17.0,300));
+    }
+    #[test] fn explicit_lifetime_remains_bounded_by_server_receipt_time(){
+        let i=item();let mut expired=Privacy::default();expired.observe(&i,true,0.0,131);
+        assert!(expired.hidden(&i,0.0,300),"本机显示窗口不能延长邮件明确的有效期");
+        let mut partial=Privacy::default();partial.observe(&i,true,10.0,120);
+        assert!(!partial.hidden(&i,19.9,60));assert!(partial.hidden(&i,20.0,60));
+        let mut shorter=Privacy::default();shorter.observe(&i,true,0.0,100);
+        assert!(shorter.hidden(&i,15.0,15),"用户选择的更短本机隐藏时长仍生效");
     }
     #[test] fn masking_covers_normalized_code_variants(){
         for (text,code) in [("验证码 １２３４５６","123456"),("验证码 12\u{200b}3456","123456"),("验证码 123456","123 456"),("验证码 ＡＢＣ－１２３","ABC-123")] {

@@ -311,7 +311,7 @@ impl eframe::App for Shell {
             self.mail.sync(accounts,sig.1);
             self.mail_sig=sig;
         }
-        while let Some(ev)=self.mail.try_recv(){self.app.mail_event(ev);}
+        while let Some(ev)=self.mail.try_recv(){self.app.mail_event_at(ev,env.t);}
         // 日程连接或自动同步开关变化时下发给工作线程。
         // 录制/截图演示用的是假账号，别让真服务去连（会立刻失败、把状态改成红色）。
         #[cfg(feature="record")]
