@@ -229,6 +229,12 @@ impl Window {
 
     pub fn hwnd(&self) -> HWND { self.hwnd }
 
+    /// 岛窗口所在屏幕的系统缩放（不含“岛的大小”额外倍数），例如 200% 时为 2.0。
+    pub fn dpi_scale(&self) -> f32 {
+        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd) };
+        if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+    }
+
     /// 框选期间只更新绘制与命中区，不能重新置顶压住截图遮罩。
     pub fn set_screenshot_capturing(&mut self, capturing: bool) {
         self.screenshot_capturing = capturing;

@@ -1008,6 +1008,16 @@ impl App {
                             });
                             ui.label(egui::RichText::new(if !self.settings.display_id.is_empty()&&selected.is_none(){"暂时显示在主屏，重新连接所选屏幕后自动恢复。"}else{"显示在所选屏幕顶部中央；断开时暂时回到主屏。"}).size(11.0).color(ui.visuals().weak_text_color()));
                             ui.separator();
+                            ui.horizontal_wrapped(|ui|{
+                                ui.add_sized([56.0,30.0],egui::Label::new("岛的大小"));
+                                for value in crate::model::UI_SCALES {
+                                    if ui.add_sized([52.0,30.0],egui::SelectableLabel::new(self.settings.ui_scale==value,format!("{value}%"))).clicked(){self.settings.ui_scale=value;}
+                                }
+                            });
+                            let limited=self.settings.ui_scale>self.ui_scale_max;
+                            ui.label(egui::RichText::new(if limited {format!("当前屏幕最多显示到 {}%，换到更大的屏幕后按所选大小显示。",self.ui_scale_max)}
+                                else {"只放大岛，设置和邮件等窗口保持原大小。".to_string()}).size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.separator();
                             ui.horizontal(|ui|{
                                 ui.add_sized([56.0,30.0],egui::Label::new("时间制式"));
                                 for (value,label) in [(false,"24 小时"),(true,"12 小时")] {

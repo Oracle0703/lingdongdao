@@ -391,6 +391,8 @@ pub struct App {
     forced_open_until:f64,
     pub settings_open:bool,
     pub displays:Vec<crate::display_layout::Display>,
+    /// 当前屏幕允许的最大岛的大小（百分比），由外壳按岛所在屏幕更新，供设置页提示。
+    pub ui_scale_max:u16,
     browser_at_top:bool,
     browser_minimal_active:bool,
     pub(crate) settings_focus_requested:bool,
@@ -524,7 +526,7 @@ impl App {
             music_sources: Vec::new(),
             music_sources_open: false,
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, displays:Vec::new(), ui_scale_max:150, browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, pet: Default::default(), last_drink: None,

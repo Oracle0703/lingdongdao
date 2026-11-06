@@ -28,6 +28,8 @@ record = []
 imap = { path = "vendor/imap" }
 imap-proto = { path = "vendor/imap-proto" }
 eframe = { path = "vendor/eframe" }
+# 岛仔补丁：只放大岛窗口（设置 → 岛的大小），见 vendor/egui-winit/src/lib.rs 中的“岛仔补丁”。
+egui-winit = { path = "vendor/egui-winit" }
 
 [dependencies]
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
@@ -54,6 +56,8 @@ eframe = { version = "0.31", default-features = false, features = ["glow", "defa
 [target.'cfg(windows)'.dependencies]
 memmap2 = "0.9.12"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
+# 与 eframe 使用同一版本，仅为调用岛窗口放大补丁 `set_window_extra_scale`。
+egui-winit = { version = "0.31.1", default-features = false }
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",

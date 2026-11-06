@@ -21,6 +21,12 @@ struct Shell {
     placed: bool,
     placement_at: PollClock,
     placement_scale: f32,
+    /// 岛窗口按哪个每点像素数设置过尺寸；不一致时（改了岛的大小或换了屏幕缩放）重设窗口大小。
+    #[cfg(windows)]
+    sized_ppp: f32,
+    /// 当前登记给岛窗口的额外放大倍数（设置 → 岛的大小）。
+    #[cfg(windows)]
+    island_scale: f32,
     win_x: f32,
     sys: (Option<u8>, bool, PollClock),
     #[cfg(windows)]
@@ -71,6 +77,8 @@ impl Shell {
         diagnostics::graphics(cc);
         diagnostics::startup("加载本地配置");
         let mut app = App::new(&cc.egui_ctx, Options::default());
+        // 岛的大小只由设置决定：关掉 egui 自带的 Ctrl +/-/0 缩放（它会同时缩放岛和所有窗口）。
+        cc.egui_ctx.options_mut(|o|o.zoom_with_keyboard=false);
         #[cfg(feature="record")] let quota_demo=std::env::var("DAOZAI_QUOTA_DEMO").is_ok();
         #[cfg(not(feature="record"))] let quota_demo=false;
         diagnostics::startup("初始化额度配置");
@@ -104,6 +112,15 @@ impl Shell {
         let initial_input=None;
         #[cfg(windows)] let system_state=daozai::system::Snapshot::default();
         #[cfg(windows)] let system_rx=daozai::system::observe(cc.egui_ctx.clone(),system_state.clone(),initial_input);
+        // 第一帧之前就登记岛的放大倍数，避免先以原大小显示再跳变。屏幕上限在拿到显示器信息后再校正。
+        #[cfg(windows)]
+        let native = daozai::native::Window::new(cc);
+        #[cfg(windows)]
+        let island_scale = native.as_ref().map_or(1.0, |window| {
+            let scale=daozai::display_layout::island_zoom(app.settings.ui_scale,None,window.dpi_scale());
+            egui_winit::set_window_extra_scale(window.hwnd().0 as isize,scale);
+            scale
+        });
         Self {
             app,
             t0: Instant::now(),
@@ -116,6 +133,10 @@ impl Shell {
             placed: false,
             placement_at: PollClock::default(),
             placement_scale: 0.0,
+            #[cfg(windows)]
+            sized_ppp: 0.0,
+            #[cfg(windows)]
+            island_scale,
             win_x: 0.0,
             sys: (None, false, PollClock::default()),
             #[cfg(windows)]
@@ -128,7 +149,7 @@ impl Shell {
             #[cfg(windows)] incoming,
             #[cfg(windows)] hidden:false,
             #[cfg(windows)]
-            native: daozai::native::Window::new(cc),
+            native,
             #[cfg(windows)]
             tray,
             #[cfg(windows)]
@@ -218,6 +239,28 @@ impl Shell {
     fn end_screenshot(&mut self) {
         self.app.end_screenshot();
         if let Some(native) = &mut self.native { native.set_screenshot_capturing(false); }
+    }
+
+    /// 岛的大小：只给岛窗口登记额外放大倍数（vendor/egui-winit 的岛仔补丁），设置、邮件等窗口保持系统缩放。
+    /// 岛窗口的每点像素数随之变化，下一帧生效；生效后按画布逻辑尺寸重设窗口，定位逻辑也因此重新居中。
+    #[cfg(windows)]
+    fn apply_island_scale(&mut self, ctx: &egui::Context) {
+        let ppp=ctx.pixels_per_point();
+        if (ppp-self.sized_ppp).abs()>1e-3 {
+            self.sized_ppp=ppp;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(app::CANVAS_W,app::WIN_H)));
+        }
+        if self.app.is_screenshot_capturing() {return;}
+        let Some(window)=&self.native else{return};
+        let system=window.dpi_scale();
+        let bounds=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|d.bounds);
+        self.app.ui_scale_max=(daozai::display_layout::island_zoom(150,bounds,system)*100.0).round() as u16;
+        let scale=daozai::display_layout::island_zoom(self.app.settings.ui_scale,bounds,system);
+        if (scale-self.island_scale).abs()>1e-3 {
+            self.island_scale=scale;
+            egui_winit::set_window_extra_scale(window.hwnd().0 as isize,scale);
+            ctx.request_repaint();
+        }
     }
 
     #[cfg(windows)]
@@ -328,6 +371,8 @@ impl eframe::App for Shell {
             self.poll_tray(ctx);
             self.show_screenshot_notices();
         }
+        #[cfg(windows)]
+        self.apply_island_scale(ctx);
         #[cfg(windows)]
         if !self.app.is_screenshot_capturing() && (!self.placed || self.placement_scale!=ctx.pixels_per_point() || self.placement_at.ready(Duration::from_secs(1))) {
             self.placement_at=PollClock::now();

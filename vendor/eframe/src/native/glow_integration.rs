@@ -1157,7 +1157,8 @@ impl GlutinWindowContext {
                 self.egui_ctx.clone(),
                 viewport_id,
                 event_loop,
-                Some(window.scale_factor() as f32),
+                // 岛仔补丁：与 egui-winit 一致，包含岛窗口的额外放大倍数。
+                Some(egui_winit::native_pixels_per_point(&window)),
                 event_loop.system_theme(),
                 self.max_texture_side,
             )

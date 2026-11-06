@@ -23,6 +23,7 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     assert!(!upgraded.clock_12h && !upgraded.notification_preview);
     assert!(upgraded.music_source.is_empty(),"旧配置必须继续自动选择音乐来源");
     assert_eq!(upgraded.clock_period,0);assert_eq!(upgraded.mail_code_hide_seconds,60);
+    assert_eq!(upgraded.ui_scale,100,"旧配置没有界面大小时保持原大小");
     for _ in 0..2 {
         crate::model::Settings::load().save().unwrap();
         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
@@ -39,6 +40,22 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     assert_eq!(accounts[0].endpoint().unwrap(),("imap.qq.com".into(),993,"OldUser@qq.com".into()));
     assert!(!accounts[1].enabled);
     crate::mail::save_accounts(&accounts);assert_eq!(crate::mail::load_accounts(),accounts);
+}
+
+#[test]
+fn ui_scale_saves_only_offered_sizes(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
+    let directory=crate::model::config_dir();
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut settings=crate::model::Settings::load();
+    settings.ui_scale=120;settings.save().unwrap();
+    assert_eq!(crate::model::Settings::load().ui_scale,120);
+    for invalid in ["135","90","abc",""] {
+        std::fs::write(directory.join("settings.txt"),format!("pet=0\nui_scale={invalid}\n")).unwrap();
+        let loaded=crate::model::Settings::load();
+        assert_eq!(loaded.ui_scale,100,"非可选值 {invalid:?} 回到 100%");
+        assert!(!loaded.pet,"其他设置照常读取");
+    }
 }
 
 #[test]
