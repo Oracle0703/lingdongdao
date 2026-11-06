@@ -222,6 +222,7 @@ pub(crate) struct MailState {
     pub open_uid: Option<(String, u32)>,
     pub reading: Option<mail::Item>,
     pub reader_focus: bool,
+    pub reader_presented: bool,
     /// 已经提醒过的会议，键是 `UID + DTSTART`（邮件和日历两条来源共用）。
     pub fired: std::collections::HashSet<String>,
 }
@@ -326,6 +327,10 @@ pub struct App {
     /// 前台切换导致的强制收起：光标离开前不再自动展开。
     pub hover_lock: bool,
     pub(crate) reveal: f32,
+    /// 框选期间只推进后台状态，不让岛参与鼠标交互或自动弹出。
+    screenshot_capturing: bool,
+    screenshot_deferred_mail: Option<mail::Item>,
+    screenshot_deferred_cmds: Vec<Cmd>,
 
     // 切页
     pub(crate) page: usize,
@@ -475,6 +480,9 @@ impl App {
             leave_since: None,
             hover_lock: false,
             reveal: 0.0,
+            screenshot_capturing: false,
+            screenshot_deferred_mail: None,
+            screenshot_deferred_cmds: Vec::new(),
             page: initial_page,
             page_from: initial_page,
             page_dir: 1.0,
@@ -586,6 +594,7 @@ impl App {
         match ev {
             mail::Event::MailboxReset { account } => {
                 if !watching(&account) {return;}
+                if self.screenshot_deferred_mail.as_ref().is_some_and(|p|p.account.eq_ignore_ascii_case(&account)) {self.screenshot_deferred_mail=None;}
                 if self.mail.preview.as_ref().is_some_and(|p|p.item.account.eq_ignore_ascii_case(&account)) {self.end_mail_preview(true);}
                 self.mail.recent.retain(|item| !item.account.eq_ignore_ascii_case(&account));
                 self.mail.invitations.reset(&account);
@@ -619,7 +628,9 @@ impl App {
                 self.mail.digests.retain(self.mail.recent.iter().chain(self.mail.reading.as_ref()));
                 self.mail.privacy.retain(&self.mail.recent);
                 if new && first_delivery {
-                    self.start_mail_preview(self.mail.recent[0].clone());
+                    if self.screenshot_capturing {
+                        if self.mail.recent[0].code.is_some() {self.screenshot_deferred_mail=Some(self.mail.recent[0].clone());}
+                    } else {self.start_mail_preview(self.mail.recent[0].clone());}
                 }
                 if new && self.settings.mail_enabled {
                     let item=&self.mail.recent[0];
@@ -1000,6 +1011,7 @@ impl App {
     }
 
     pub fn show_page(&mut self,page:usize) {
+        if self.screenshot_capturing {return;}
         self.end_mail_preview(false);
         if !self.settings.visible_pages[page] {
             self.settings_tab=PAGE_SETTINGS_TABS[page];
@@ -1052,7 +1064,47 @@ impl App {
         self.adding || self.editing.is_some() || self.task_dialog.is_some() || self.calendar.draft.is_some()
     }
 
+    /// 截图必须先进入此状态，再排除岛窗口并取帧。已有草稿和独立窗口保留。
+    pub fn begin_screenshot(&mut self) -> bool {
+        if self.screenshot_capturing {return false;}
+        if self.drag_hot || self.task_dialog.is_some() {
+            self.say("请先完成当前拖放或任务对话框，再开始截图");
+            return false;
+        }
+        self.screenshot_capturing=true;
+        self.open=false;
+        self.hover_since=None;
+        self.leave_since=None;
+        self.forced_open_until=0.0;
+        self.wheel_delta=0.0;
+        self.notice_details=false;
+        let (width,height)=self.base_size();
+        self.w.snap(width);
+        self.h.snap(height);
+        self.reveal=0.0;
+        true
+    }
+
+    /// 所有完成、取消和失败路径共用；保存 PNG 不必保持截图状态。
+    pub fn end_screenshot(&mut self) {
+        if !self.screenshot_capturing {return;}
+        self.screenshot_capturing=false;
+        self.hover_lock=false;
+        self.hover_since=None;
+        self.leave_since=None;
+        self.pending.append(&mut self.screenshot_deferred_cmds);
+        if let Some(item)=self.screenshot_deferred_mail.take() {
+            // 截图中可能移除了账号、重置了邮箱或更新了同一封邮件。
+            let current=self.mail.recent.iter().find(|m|m.uid==item.uid && m.account.eq_ignore_ascii_case(&item.account))
+                .filter(|m|self.mail.accounts.iter().any(|a|a.enabled && a.email.eq_ignore_ascii_case(&m.account))).cloned();
+            if let Some(item)=current {self.start_mail_preview(item);}
+        }
+    }
+
+    pub fn is_screenshot_capturing(&self) -> bool {self.screenshot_capturing}
+
     pub fn foreground_changed(&mut self) {
+        if self.screenshot_capturing {return;}
         self.hover_lock=true;
         if self.adding && self.buf.trim().is_empty(){self.cancel_edit();}
     }
@@ -1225,6 +1277,7 @@ impl App {
     // 每帧入口
     // ---------------------------------------------------------------
     pub fn frame(&mut self, ui: &mut egui::Ui, win: Rect, env: &Env) -> FrameOut {
+        if self.screenshot_capturing {ui.disable();}
         let ctx = ui.ctx().clone();
         self.mail.digests.poll();
         let dt = match self.last_t {
@@ -1249,7 +1302,7 @@ impl App {
         }
         self.browser_minimal_active=browser_minimal;
         self.tick_mail_preview();
-        if self.mail.preview.is_some() && ctx.input(|i|i.key_pressed(egui::Key::Escape)) {self.end_mail_preview(true);}
+        if !self.screenshot_capturing && self.mail.preview.is_some() && ctx.input(|i|i.key_pressed(egui::Key::Escape)) {self.end_mail_preview(true);}
         if !self.started {
             self.started = true;
             self.last_input = env.t;
@@ -1266,7 +1319,7 @@ impl App {
         self.tick(env, dt, elapsed);
         self.salary_tick(env);
         self.sync_device(env);
-        self.tick_alerts();
+        if !self.screenshot_capturing {self.tick_alerts();}
         let hud_active=self.notice.clone();
         if hud_active.as_ref().map(|a|&a.title)!=self.hud_notice.as_ref().map(|a|&a.title)||hud_active.is_none(){self.notice_details=false;}
         if let Some(a)=&hud_active {self.hud_notice=Some(a.clone());}
@@ -1295,6 +1348,7 @@ impl App {
 
         // ---------- 输入：拖放 ----------
         let (hovering_files, dropped) = ctx.input(|i| {
+            if self.screenshot_capturing {return (false,Vec::new());}
             (
                 self.settings.visible_pages[3] && !i.raw.hovered_files.is_empty(),
                 i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>(),
@@ -1322,7 +1376,7 @@ impl App {
         // ---------- 输入：悬停 ----------
         let p_prev = self.progress();
         let hit = self.hit_rect(cx, top, p_prev);
-        let inside = env.cursor.is_some_and(|c| hit.contains(c));
+        let inside = !self.screenshot_capturing && env.cursor.is_some_and(|c| hit.contains(c));
         let on_notice=env.cursor.is_some_and(|c|self.notice_rect(cx,top).is_some_and(|r|r.contains(c))||self.notice_details_rect(cx,top).is_some_and(|r|r.contains(c)));
         if !inside {
             self.hover_lock = false;
@@ -1333,7 +1387,7 @@ impl App {
             }
             self.last_cursor = env.cursor;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
+        if !self.screenshot_capturing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
         if self.mail.preview.is_none() && !self.is_editing() && inside && self.open && self.reveal > 0.95 {
@@ -1382,7 +1436,7 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = self.mail.preview.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
+        let want = !self.screenshot_capturing && (self.mail.preview.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open));
         // 悬停在收起的工资金额上展开时，直接打开工资页。
         let salary_hover=!self.open && self.salary_bar_visible()
             && env.cursor.is_some_and(|c|(c.x-(cx+self.resident.position(bar::SALARY))).abs()<=bar::SALARY_WIDTH/2.0+6.0 && c.y-top<=BAR_H+4.0);
@@ -1537,13 +1591,19 @@ impl App {
         if let Some(wait)=self.salary_next_tick(salary_visible) {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64(wait));}
         if let Some(preview)=&self.mail.preview {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64((preview.until-self.t).max(0.0)));}
         cmds.append(&mut self.pending);
+        if self.screenshot_capturing {
+            cmds.retain(|cmd| {
+                if matches!(cmd,Cmd::Notify(..)) {self.screenshot_deferred_cmds.push(cmd.clone());false}
+                else {!matches!(cmd,Cmd::Focus)}
+            });
+        }
         FrameOut {
             region: rel(floating_toast.map_or(region,|toast|region.union(toast)).intersect(ui.max_rect())),
-            hit: rel(self.hit_rect(cx, top, self.progress())),
-            notice_hit:notice_shape.map(|r|rel(notice_details.map_or(r,|details|r.union(details)))),
-            file_drop_zone:self.settings.visible_pages[3].then(||rel(Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0)))),
+            hit: if self.screenshot_capturing {Rect::from_min_size(Pos2::ZERO,Vec2::ZERO)}else{rel(self.hit_rect(cx, top, self.progress()))},
+            notice_hit:notice_shape.filter(|_|!self.screenshot_capturing).map(|r|rel(notice_details.map_or(r,|details|r.union(details)))),
+            file_drop_zone:(!self.screenshot_capturing && self.settings.visible_pages[3]).then(||rel(Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0)))),
             expanded: self.open,
-            editing: self.is_editing(),
+            editing: !self.screenshot_capturing && self.is_editing(),
             animating,
             repaint_after,
             cmds,

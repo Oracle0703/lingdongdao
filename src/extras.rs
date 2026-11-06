@@ -827,10 +827,11 @@ const SETTINGS_GROUPS: [(&str,usize,usize);9] = [
 impl App {
     pub fn settings_ui(&mut self,ctx:&egui::Context,autostart:bool){
         self.updates.poll(ctx);
-        self.updates.dialog_ui(ctx);
+        self.updates.dialog_ui(ctx,!self.is_screenshot_capturing());
         if !self.settings_open{return;}
         let id=egui::ViewportId::from_hash_of("daozai-settings");
-        let focus_requested=std::mem::take(&mut self.settings_focus_requested);
+        // 框选不能被独立窗口抢焦点；短路保留请求，截图结束后再消费。
+        let focus_requested=!self.is_screenshot_capturing() && std::mem::take(&mut self.settings_focus_requested);
         ctx.show_viewport_immediate(id,egui::ViewportBuilder::default().with_title("岛仔设置").with_icon(theme::app_icon()).with_inner_size([760.0,640.0]).with_min_inner_size([600.0,450.0]).with_visible(false).with_active(false).with_window_level(egui::WindowLevel::Normal),|ctx,_|{
             let dark=self.settings.settings_theme.dark(crate::settings_theme::system_dark(ctx));
             let original_style=ctx.style();

@@ -42,6 +42,12 @@ struct Shell {
     #[cfg(windows)]
     tray: Option<daozai::tray::Tray>,
     #[cfg(windows)]
+    screenshot: Option<daozai::screenshot::Capture>,
+    #[cfg(windows)]
+    screenshot_notices: Vec<(String, String)>,
+    #[cfg(windows)]
+    screenshot_hotkey_seen: bool,
+    #[cfg(windows)]
     autostart: bool,
     /// v0.5.4：蓝牙音频设备（后台线程推送）与音量回声的静默窗口。
     #[cfg(windows)]
@@ -126,6 +132,12 @@ impl Shell {
             #[cfg(windows)]
             tray,
             #[cfg(windows)]
+            screenshot: None,
+            #[cfg(windows)]
+            screenshot_notices: Vec::new(),
+            #[cfg(windows)]
+            screenshot_hotkey_seen: false,
+            #[cfg(windows)]
             autostart,
             #[cfg(windows)]
             bt_rx: None,
@@ -141,11 +153,18 @@ impl Shell {
     }
 
     #[cfg(windows)]
-    fn poll_tray(&mut self) {
+    fn poll_tray(&mut self, ctx: &egui::Context) {
         use daozai::tray::{self, Event};
         let events = self.tray.as_ref().map(|t| t.poll()).unwrap_or_default();
         for e in events {
             match e {
+                Event::StartScreenshot => self.begin_screenshot(ctx),
+                Event::ScreenshotHotkeyChanged(status) => {
+                    if self.screenshot_hotkey_seen || status.error_code.is_some() {
+                        self.screenshot_notices.push(("截图快捷键".into(), status.message()));
+                    }
+                    self.screenshot_hotkey_seen = true;
+                }
                 Event::OpenSettings=>self.app.open_settings(),
                 Event::OpenCalendar=>self.app.open_calendar(None),
                 Event::TogglePet => {
@@ -173,6 +192,73 @@ impl Shell {
         }
     }
 
+    #[cfg(windows)]
+    fn begin_screenshot(&mut self, ctx: &egui::Context) {
+        if self.app.is_screenshot_capturing() { return; }
+        let Some(hwnd) = self.native.as_ref().map(|window| window.hwnd()) else {
+            self.screenshot_notices.push(("无法开始截图".into(), "岛窗口尚未就绪，请稍后重试".into()));
+            return;
+        };
+        if !self.app.begin_screenshot() { return; }
+        if let Some(native) = &mut self.native { native.set_screenshot_capturing(true); }
+        let result = (|| {
+            if self.screenshot.is_none() {
+                self.screenshot = Some(daozai::screenshot::Capture::new(ctx.clone())?);
+            }
+            self.screenshot.as_mut().unwrap().begin(hwnd)
+        })();
+        if let Err(error) = result {
+            self.end_screenshot();
+            self.screenshot_notices.push(("无法开始截图".into(), error));
+        }
+        ctx.request_repaint();
+    }
+
+    #[cfg(windows)]
+    fn end_screenshot(&mut self) {
+        self.app.end_screenshot();
+        if let Some(native) = &mut self.native { native.set_screenshot_capturing(false); }
+    }
+
+    #[cfg(windows)]
+    fn poll_screenshot(&mut self) {
+        use daozai::screenshot::CaptureEvent;
+        let events = self.screenshot.as_mut().map(|capture| capture.poll()).unwrap_or_default();
+        for event in events {
+            match event {
+                CaptureEvent::SelectionFinished | CaptureEvent::Cancelled => self.end_screenshot(),
+                CaptureEvent::Failed(error) => {
+                    self.end_screenshot();
+                    self.screenshot_notices.push(("截图失败".into(), error));
+                }
+                CaptureEvent::Saved { path, width, height, elapsed_ms } => {
+                    self.screenshot_notices.push(("截图已保存（阶段 A）".into(), format!(
+                        "{width} × {height} 像素 · {elapsed_ms:.1} ms\n{}", path.display()
+                    )));
+                }
+                CaptureEvent::SaveFailed(error) => {
+                    self.screenshot_notices.push(("截图保存失败".into(), error));
+                }
+                CaptureEvent::Copied(result) => {
+                    let (title, body) = match result {
+                        Ok(()) => ("截图已复制", "已复制到剪贴板，可以直接粘贴图片".to_string()),
+                        Err(error) => ("截图复制失败", error),
+                    };
+                    self.screenshot_notices.push((title.into(), body));
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn show_screenshot_notices(&mut self) {
+        if self.app.is_screenshot_capturing() { return; }
+        for (title, body) in self.screenshot_notices.drain(..) {
+            self.app.say(&body);
+            if let Some(tray) = &self.tray { tray.notify(&title, &body, false); }
+        }
+    }
+
     fn env(&mut self, ctx: &egui::Context) -> Env {
         let (clock, clock_ms, today, date) = local_now();
         // 电量变化很慢，每 5 秒读一次就够
@@ -186,7 +272,9 @@ impl Shell {
         let origin = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min).unwrap_or(Pos2::new(self.win_x, 0.0));
         #[cfg(windows)]
         let origin=self.native.as_ref().and_then(|w|w.logical_origin(ppp)).unwrap_or(origin);
-        let cursor = cursor_logical(ppp).map(|(x, y)| Pos2::new(x - origin.x, y - origin.y));
+        let cursor = if self.app.is_screenshot_capturing() { None } else {
+            cursor_logical(ppp).map(|(x, y)| Pos2::new(x - origin.x, y - origin.y))
+        };
         Env {
             t: self.t0.elapsed().as_secs_f64(),
             clock,
@@ -230,14 +318,18 @@ impl eframe::App for Shell {
             self.frame_at=Instant::now();
         }
         #[cfg(windows)]
-        self.poll_tray();
-        #[cfg(windows)]
-        if daozai::native::take_foreground_change() {
-            // 切到别的程序：收起，并在光标离开前不再自动展开
-            self.app.foreground_changed();
+        {
+            // 先消费遮罩关闭/归还焦点产生的事件，再解除截图状态。
+            // 否则 end_screenshot 刚恢复的悬停会被这条旧通知重新锁住。
+            if daozai::native::take_foreground_change() && !self.app.is_screenshot_capturing() {
+                self.app.foreground_changed();
+            }
+            self.poll_screenshot();
+            self.poll_tray(ctx);
+            self.show_screenshot_notices();
         }
         #[cfg(windows)]
-        if !self.placed || self.placement_scale!=ctx.pixels_per_point() || self.placement_at.ready(Duration::from_secs(1)) {
+        if !self.app.is_screenshot_capturing() && (!self.placed || self.placement_scale!=ctx.pixels_per_point() || self.placement_at.ready(Duration::from_secs(1))) {
             self.placement_at=PollClock::now();
             self.placement_scale=ctx.pixels_per_point();
             self.app.displays=daozai::display_layout::connected();
@@ -422,7 +514,7 @@ impl eframe::App for Shell {
                     self.cal.configure(configs.clone(),self.app.settings.calendar_auto_sync);
                     self.cal_sig=(configs,self.app.settings.calendar_auto_sync);
                 },
-                Cmd::Focus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+                Cmd::Focus => if !self.app.is_screenshot_capturing() { ctx.send_viewport_cmd(egui::ViewportCommand::Focus); },
             }
         }
 

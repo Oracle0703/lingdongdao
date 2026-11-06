@@ -301,6 +301,8 @@ fn quality_removed_mail_accounts_ignore_in_flight_results() {
 
 #[path = "mail_preview_ui_tests.rs"]
 mod mail_preview_tests;
+#[path = "screenshot_capture_ui_tests.rs"]
+mod screenshot_capture_tests;
 
 struct H {
     ctx: egui::Context,
