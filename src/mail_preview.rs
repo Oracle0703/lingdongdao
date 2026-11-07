@@ -21,7 +21,8 @@ impl App {
         self.leave_since=None;
         self.forced_open_until=0.0;
         self.w.tune(OPEN_W.0,OPEN_W.1);self.h.tune(OPEN_H.0,OPEN_H.1);
-        self.w.target=PW;self.h.target=HEIGHT;
+        // 截图预览开着时由它决定高度，验证码预览排在其后显示。
+        self.w.target=PW;self.h.target=self.expanded_height();
     }
 
     pub(super) fn tick_mail_preview(&mut self) {

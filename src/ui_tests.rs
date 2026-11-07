@@ -320,6 +320,8 @@ fn quality_removed_mail_accounts_ignore_in_flight_results() {
 mod mail_preview_tests;
 #[path = "screenshot_capture_ui_tests.rs"]
 mod screenshot_capture_tests;
+#[path = "screenshot_ui_tests.rs"]
+mod screenshot_ui_tests;
 
 struct H {
     ctx: egui::Context,
@@ -1356,7 +1358,9 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
 fn navigation_wraps_between_visible_pages_and_notification_settings_remain_accessible() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,crate::app::SCREENSHOT_PAGE);
-    h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,68.0));assert_eq!(h.app.page,0);
+    // 截图页不画翻页箭头（左右箭头用来切换截图）；用标题行滚轮或页码豆翻页。
+    h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,68.0));assert_eq!(h.app.page,crate::app::SCREENSHOT_PAGE);
+    h.hover(H::local(210.0,18.0),0.3);h.wheel(-40.0);assert_eq!(h.app.page,0);
     h.app.open_settings_category(3);assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,6);
 }
 

@@ -273,7 +273,7 @@ impl Shell {
     }
 
     #[cfg(windows)]
-    fn poll_screenshot(&mut self) {
+    fn poll_screenshot(&mut self, ctx: &egui::Context) {
         use daozai::screenshot::CaptureEvent;
         let events = self.screenshot.as_mut().map(|capture| capture.poll()).unwrap_or_default();
         for event in events {
@@ -283,21 +283,11 @@ impl Shell {
                     self.end_screenshot();
                     self.screenshot_notices.push(("截图失败".into(), error));
                 }
-                CaptureEvent::Saved { path, width, height, elapsed_ms } => {
-                    self.screenshot_notices.push(("截图已保存".into(), format!(
-                        "{width} × {height} 像素 · {elapsed_ms:.1} ms\n{}", path.display()
-                    )));
-                }
+                CaptureEvent::Saved { path, images, .. } => self.app.screenshot_saved(ctx, &path, images),
                 CaptureEvent::SaveFailed(error) => {
                     self.screenshot_notices.push(("截图保存失败".into(), error));
                 }
-                CaptureEvent::Copied(result) => {
-                    let (title, body) = match result {
-                        Ok(()) => ("截图已复制", "已复制到剪贴板，可以直接粘贴图片".to_string()),
-                        Err(error) => ("截图复制失败", error),
-                    };
-                    self.screenshot_notices.push((title.into(), body));
-                }
+                CaptureEvent::Copied(result) => self.app.screenshot_copied(result),
             }
         }
     }
@@ -376,7 +366,7 @@ impl eframe::App for Shell {
             if daozai::native::take_foreground_change() && !self.app.is_screenshot_capturing() {
                 self.app.foreground_changed();
             }
-            self.poll_screenshot();
+            self.poll_screenshot(ctx);
             self.poll_tray(ctx);
             self.show_screenshot_notices();
         }
@@ -428,7 +418,8 @@ impl eframe::App for Shell {
                 self.system_ready=true;
                 self.fullscreen=observation.fullscreen;
             }
-            self.hidden=daozai::display_layout::hide_for_fullscreen(self.app.settings.hide_fullscreen,self.fullscreen,daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|d.bounds));
+            // 用户主动截图后的预览允许临时显示，结束后恢复原有的全屏隐藏。
+            self.hidden=!self.app.screenshot_preview_active() && daozai::display_layout::hide_for_fullscreen(self.app.settings.hide_fullscreen,self.fullscreen,daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|d.bounds));
             if self.app.settings.bluetooth_notifications {
                 if self.bt_rx.is_none() {self.bt_rx=Some(daozai::bt::spawn());}
             } else {
@@ -563,6 +554,21 @@ impl eframe::App for Shell {
                 Cmd::CalendarMonth(month)=>self.cal.view_month(month),
                 Cmd::BeginScreenshot=>{
                     #[cfg(windows)] self.begin_screenshot(ctx);
+                },
+                Cmd::ScreenshotCopy(path)=>{
+                    #[cfg(windows)] {
+                        if self.screenshot.is_none() { self.screenshot = daozai::screenshot::Capture::new(ctx.clone()).ok(); }
+                        match &self.screenshot { Some(capture)=>capture.copy_path(path), None=>self.app.say("无法启动截图复制") }
+                    }
+                },
+                Cmd::ScreenshotDelete(path)=>{
+                    #[cfg(windows)] {
+                        let result=match daozai::screenshot::store::resolve_root(&self.app.settings.screenshot_dir) {
+                            Some(root)=>daozai::screenshot::store::recycle(&root,&path).map(|done|done==daozai::screenshot::store::Recycled::Done),
+                            None=>Err("还没有设置截图保存位置".into()),
+                        };
+                        self.app.screenshot_deleted(&path,result);
+                    }
                 },
                 Cmd::ScreenshotChooseFolder=>{
                     #[cfg(windows)] match daozai::system::pick_folder("选择截图保存位置"){Ok(Some(dir))=>self.app.set_screenshot_dir(dir),Ok(None)=>{},Err(e)=>self.app.say(format!("无法选择文件夹：{}",e.code()))}

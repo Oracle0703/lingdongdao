@@ -69,6 +69,8 @@ mod mail_regressions;
 
 #[path = "mail_preview.rs"]
 mod mail_preview;
+#[path = "screenshot_preview.rs"]
+mod screenshot_preview;
 
 pub struct Options {
     /// 是否联网查歌词（录制/测试时关掉）。
@@ -161,6 +163,10 @@ pub enum Cmd {
     BeginScreenshot,
     /// 打开文件夹选择框，设置截图保存位置。
     ScreenshotChooseFolder,
+    /// 把这张截图复制到剪贴板（后台解码）。
+    ScreenshotCopy(PathBuf),
+    /// 把这张截图移入回收站（已在岛上确认）。
+    ScreenshotDelete(PathBuf),
 }
 
 pub struct FrameOut {
@@ -460,6 +466,8 @@ pub struct App {
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
     pub(crate) salary: crate::salary_ui::State,
+    /// 截图图库与截图后的自动预览。
+    pub(crate) shots: crate::screenshot_ui::Gallery,
 }
 
 impl App {
@@ -564,6 +572,7 @@ impl App {
             llm: Default::default(),
             resident: Default::default(), resident_power:(None,false),
             salary: crate::salary_ui::State::load(),
+            shots: Default::default(),
         }
     }
 
@@ -1283,7 +1292,9 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
+        if self.shots.preview.is_some() {return crate::screenshot_ui::HEIGHT;}
         if self.mail.preview.is_some() {return mail_preview::HEIGHT;}
+        if self.page==SCREENSHOT_PAGE {return crate::screenshot_ui::HEIGHT;}
         if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
@@ -1294,6 +1305,7 @@ impl App {
         if self.screenshot_capturing {ui.disable();}
         let ctx = ui.ctx().clone();
         self.mail.digests.poll();
+        self.poll_screenshots(&ctx);
         let dt = match self.last_t {
             Some(t0) => (env.t - t0).clamp(0.0, 0.1) as f32,
             None => 0.0,
@@ -1395,6 +1407,7 @@ impl App {
         if !inside {
             self.hover_lock = false;
         }
+        self.tick_screenshot_preview(inside);
         if env.cursor != self.last_cursor || ctx.input(|i| !i.events.is_empty()) {
             if inside || hovering_files || ctx.input(|i| !i.events.is_empty()) {
                 self.last_input = env.t;
@@ -1404,7 +1417,16 @@ impl App {
         if !self.screenshot_capturing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
-        if self.mail.preview.is_none() && !self.is_editing() && inside && self.open && self.reveal > 0.95 {
+        // 截图页和截图预览里，方向键、滚轮和触控板横滑用来切换截图，不翻页（标题行的滚轮除外）。
+        let gallery_input = self.shots.preview.is_some() || self.page==SCREENSHOT_PAGE && self.subpage.is_none() && self.mail.preview.is_none();
+        let mut gallery_handled = false;
+        if gallery_input && !self.is_editing() && inside && self.open && self.reveal > 0.95 {
+            let (scroll_y, scroll_x, left, right) = ctx.input(|i| (i.raw_scroll_delta.y, i.raw_scroll_delta.x, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight)));
+            let cursor = env.cursor.map(|c| c - Vec2::new(cx - PW / 2.0, top));
+            gallery_handled = self.screenshot_input(cursor, scroll_y, scroll_x, left, right) || self.shots.preview.is_some();
+            if gallery_handled { self.wheel_delta = 0.0; }
+        }
+        if !gallery_handled && self.mail.preview.is_none() && !self.is_editing() && inside && self.open && self.reveal > 0.95 {
             let (scroll, left, right, esc) = ctx.input(|i| (i.raw_scroll_delta.y, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
             if esc { self.hover_lock = true; }
             if left || right {
@@ -1450,7 +1472,7 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = !self.screenshot_capturing && (self.mail.preview.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open));
+        let want = !self.screenshot_capturing && (self.shots.preview.is_some() || self.mail.preview.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open));
         // 悬停在收起的工资金额上展开时，直接打开工资页。
         let salary_hover=!self.open && self.salary_bar_visible()
             && env.cursor.is_some_and(|c|(c.x-(cx+self.resident.position(bar::SALARY))).abs()<=bar::SALARY_WIDTH/2.0+6.0 && c.y-top<=BAR_H+4.0);
@@ -1603,6 +1625,7 @@ impl App {
         let mut repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
         // 上班中金额可见时，对齐系统时钟的下一次跳秒，保证金额每秒都更新。
         if let Some(wait)=self.salary_next_tick(salary_visible) {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64(wait));}
+        if let Some(until)=self.shots.preview.as_ref().and_then(|preview|preview.until) {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64((until-self.t).fract().max(0.02)));}
         if let Some(preview)=&self.mail.preview {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64((preview.until-self.t).max(0.0)));}
         cmds.append(&mut self.pending);
         if self.screenshot_capturing {
@@ -1841,6 +1864,7 @@ impl App {
     // 面板主体：页标题 + 页面（带切页过渡）+ 翻页箭头 + 页码豆
     // ---------------------------------------------------------------
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
+        if self.draw_screenshot_preview(c,cmds) {return;}
         if self.draw_mail_preview(c,cmds) {return;}
         let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(format!("打开{}设置窗口",PAGE_NAMES[self.page]));
         let (hover,press)=c.hover_t(&settings);
@@ -1900,14 +1924,17 @@ impl App {
     fn nav(&mut self, c: &Card) {
         let pages: Vec<_>=self.settings.page_order.iter().copied().filter(|page|self.settings.visible_pages[*page]).collect();
         if pages.len()<2 { return; }
-        let l = c.hit(8.0, 55.0, 26.0, 26.0, "nav-l");
-        let r = c.hit(385.0, 55.0, 26.0, 26.0, "nav-r");
-        let (lh, lp) = c.hover_t(&l);
-        let (rh, rp) = c.hover_t(&r);
-        paint::chevron(c, 21.0, 68.0, -1.0, lh, lp);
-        paint::chevron(c, 398.0, 68.0, 1.0, rh, rp);
-        if l.clicked() { self.navigate_page(false); }
-        if r.clicked() { self.navigate_page(true); }
+        // 截图页的左右箭头用来切换截图，不画翻页箭头；用页码豆或标题行滚轮翻页。
+        if self.page != SCREENSHOT_PAGE {
+            let l = c.hit(8.0, 55.0, 26.0, 26.0, "nav-l");
+            let r = c.hit(385.0, 55.0, 26.0, 26.0, "nav-r");
+            let (lh, lp) = c.hover_t(&l);
+            let (rh, rp) = c.hover_t(&r);
+            paint::chevron(c, 21.0, 68.0, -1.0, lh, lp);
+            paint::chevron(c, 398.0, 68.0, 1.0, rh, rp);
+            if l.clicked() { self.navigate_page(false); }
+            if r.clicked() { self.navigate_page(true); }
+        }
         // 页码豆：宽度由弹簧驱动，整行实时居中；当前页是白色长条
         let gap = 4.0;
         let dot_y=self.expanded_height()-7.2;

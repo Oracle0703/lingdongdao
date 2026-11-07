@@ -15,7 +15,8 @@ pub enum CaptureEvent {
     SelectionFinished,
     Cancelled,
     Failed(String),
-    Saved { path: PathBuf, width: u32, height: u32, elapsed_ms: f64 },
+    /// `images`：直接由内存像素生成的预览图和缩略图，界面不必再从磁盘解码。
+    Saved { path: PathBuf, width: u32, height: u32, elapsed_ms: f64, images: Arc<super::library::Images> },
     SaveFailed(String),
     Copied(Result<(), String>),
 }
@@ -88,6 +89,23 @@ impl Capture {
         Ok(())
     }
 
+    /// 图库里的「复制」：后台解码文件，再走同一条剪贴板队列，结果仍是 `Copied`。
+    pub fn copy_path(&self, path: PathBuf) {
+        let (copy_tx, tx, ctx) = (self.copy_tx.clone(), self.tx.clone(), self.ctx.clone());
+        let _ = std::thread::Builder::new().name("daozai-screenshot-copy-file".into()).spawn(move || {
+            match image::open(&path) {
+                Ok(decoded) => {
+                    let decoded = decoded.to_rgba8();
+                    let (width, height) = decoded.dimensions();
+                    let image = SelectedImage { width, height, rgba: decoded.into_raw(), confirmed_at: Instant::now(), root: None };
+                    if copy_tx.send(Arc::new(image)).is_err() { let _ = tx.send(CaptureEvent::Copied(Err("截图复制线程已停止".into()))); }
+                }
+                Err(error) => { let _ = tx.send(CaptureEvent::Copied(Err(format!("无法读取这张截图：{error}")))); }
+            }
+            ctx.request_repaint();
+        });
+    }
+
     pub fn poll(&self) -> Vec<CaptureEvent> { self.events.try_iter().collect() }
     pub fn is_selecting(&self) -> bool { self.selecting.load(Ordering::Acquire) }
     pub fn cancel(&self) { self.cancel.store(true, Ordering::Release); }
@@ -122,7 +140,8 @@ fn save_image(image: &SelectedImage) -> CaptureEvent {
         Ok(path) => {
             let elapsed_ms = image.confirmed_at.elapsed().as_secs_f64() * 1000.0;
             timing(&format!("saved {}x{} confirm_to_png_ms={elapsed_ms:.3} path={}", image.width, image.height, path.display()));
-            CaptureEvent::Saved {path, width:image.width, height:image.height, elapsed_ms}
+            let images = Arc::new(super::library::images(image.width, image.height, &image.rgba));
+            CaptureEvent::Saved {path, width:image.width, height:image.height, elapsed_ms, images}
         }
         Err(error) => { timing(&format!("save_failed {error}")); CaptureEvent::SaveFailed(error) }
     }
