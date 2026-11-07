@@ -21,7 +21,8 @@ impl App {
         self.leave_since=None;
         self.forced_open_until=0.0;
         self.w.tune(OPEN_W.0,OPEN_W.1);self.h.tune(OPEN_H.0,OPEN_H.1);
-        self.w.target=PW;self.h.target=HEIGHT;
+        // 截图预览开着时由它决定高度，验证码预览排在其后显示。
+        self.w.target=PW;self.h.target=self.expanded_height();
     }
 
     pub(super) fn tick_mail_preview(&mut self) {
@@ -35,6 +36,8 @@ impl App {
     pub(super) fn end_mail_preview(&mut self,collapse:bool) {
         if self.mail.preview.take().is_none() {return;}
         self.forced_open_until=0.0;
+        // 截图预览还盖在上面：只回到它的高度，不收起岛。
+        if collapse && self.shots.preview.is_some() {self.h.target=self.expanded_height();return;}
         if collapse {
             self.open=false;
             self.hover_lock=true;

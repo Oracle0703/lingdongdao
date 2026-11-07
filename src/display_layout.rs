@@ -45,9 +45,41 @@ pub fn island_origin(m:Bounds, island_width:f32, scale:f32)->Option<(i32,i32)> {
     Some((x.clamp(i32::MIN as f64,i32::MAX as f64) as i32,m.top))
 }
 
+/// 岛的放大倍数：用户选择的百分比，再受所在屏幕的物理尺寸限制。`native_ppp` 是屏幕的系统缩放。
+///
+/// 岛体居中，透明画布从岛中心向左延伸 `WIN_W / 2`、向右延伸 `CANVAS_W - WIN_W / 2`（右侧通知区），
+/// 所以较长的右半边决定能放大多少。上限按 10% 向下取整，屏幕再小也不低于 100%。
+/// `monitor` 未知（启动第一帧）时先按用户选择，拿到屏幕后再校正。
+pub fn island_zoom(percent:u16, monitor:Option<Bounds>, native_ppp:f32)->f32 {
+    let requested=(f32::from(percent)/100.0).clamp(1.0,1.5);
+    let Some(m)=monitor else{return requested;};
+    if m.right<=m.left || m.bottom<=m.top || !native_ppp.is_finite() || native_ppp<=0.0 {return requested;}
+    let right=crate::app::CANVAS_W-crate::app::WIN_W/2.0;
+    let fit_width=(m.right-m.left) as f32/(2.0*right*native_ppp);
+    let fit_height=(m.bottom-m.top) as f32/(crate::app::WIN_H*native_ppp);
+    let limit=((fit_width.min(fit_height)*10.0+1e-3).floor()/10.0).max(1.0);
+    requested.min(limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn zoom_follows_choice_but_keeps_canvas_and_notices_on_screen(){
+        let uhd=Bounds{left:-3840,top:0,right:0,bottom:2160};
+        // 用户的 4K、200%：画布右半边 640 × 2 × 1.5 = 1920，正好放下 150%。
+        assert_eq!(island_zoom(120,Some(uhd),2.0),1.2);
+        assert_eq!(island_zoom(150,Some(uhd),2.0),1.5);
+        // 1080p 笔记本 150%：右侧通知区已贴边，不能再放大。
+        let laptop=Bounds{left:0,top:0,right:1920,bottom:1080};
+        assert_eq!(island_zoom(130,Some(laptop),1.5),1.0);
+        assert_eq!(island_zoom(130,Some(laptop),1.25),1.2);
+        assert_eq!(island_zoom(150,Some(laptop),1.0),1.5);
+        // 未知屏幕先按选择；非法百分比夹到 100%–150%；缩放异常时不受屏幕限制。
+        assert_eq!(island_zoom(120,None,2.0),1.2);
+        assert_eq!(island_zoom(90,Some(uhd),2.0),1.0);
+        assert_eq!(island_zoom(400,None,1.0),1.5);
+        assert_eq!(island_zoom(120,Some(uhd),f32::NAN),1.2);
+    }
     #[cfg(windows)]
     #[test] fn connected_displays_have_valid_bounds_and_distinct_ids(){
         let displays=connected();

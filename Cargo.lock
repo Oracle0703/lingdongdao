@@ -480,10 +480,12 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 name = "daozai"
 version = "0.6.50"
 dependencies = [
+ "arboard",
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "eframe",
+ "egui-winit",
  "egui_extras",
  "flate2",
  "image",
@@ -654,8 +656,6 @@ dependencies = [
 [[package]]
 name = "egui-winit"
 version = "0.31.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d9dfbb78fe4eb9c3a39ad528b90ee5915c252e77bbab9d4ebc576541ab67e13"
 dependencies = [
  "ahash",
  "arboard",

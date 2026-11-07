@@ -20,6 +20,7 @@ pub(crate) struct State {
     progress: f32,
     message: String,
     dialog_open: bool,
+    dialog_presented: bool,
     focus_requested: bool,
     logo: Option<egui::TextureHandle>,
 }
@@ -42,6 +43,7 @@ impl State {
             match event {
                 Event::Checked(result) => {
                     self.dialog_open = matches!(&result, Ok(Some(_)));
+                    if !self.dialog_open {self.dialog_presented=false;}
                     self.focus_requested = self.dialog_open;
                     self.result = Some(result); self.rx = None;
                 }
@@ -64,6 +66,7 @@ impl State {
                 }
                 Event::Installed => {
                     self.rx = None;
+                    self.dialog_open=false;self.dialog_presented=false;self.focus_requested=false;
                     ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
                 }
             }
@@ -75,6 +78,7 @@ impl State {
         if ui.add_enabled(self.rx.is_none(), egui::Button::new("检查更新")).clicked() {
             let (tx, rx) = mpsc::channel(); self.rx = Some(rx);
             self.message.clear(); self.result = None; self.dialog_open = false;
+            self.dialog_presented=false;self.focus_requested=false;
             let ctx = ui.ctx().clone();
             std::thread::spawn(move || { let _ = tx.send(Event::Checked(check())); ctx.request_repaint(); });
         }
@@ -95,18 +99,24 @@ impl State {
     fn dismiss(&mut self) {
         if let Some(cancel) = &self.cancel { cancel.store(true, Ordering::Relaxed); }
         self.dialog_open = false;
+        self.dialog_presented=false;
+        self.focus_requested=false;
     }
 
-    pub(crate) fn dialog_ui(&mut self, ctx: &egui::Context) {
+    pub(crate) fn dialog_ui(&mut self, ctx: &egui::Context, allow_focus: bool) {
         use crate::theme::{self, W};
-        if !self.dialog_open { return; }
-        let Some(Ok(Some(release))) = self.result.clone() else { return; };
-        let focus = std::mem::take(&mut self.focus_requested);
+        if !self.dialog_open {self.dialog_presented=false;return;}
+        // 固定的 active 是创建属性。异步结果不能在框选中首次创建并激活窗口，
+        // 但已存在的视口必须继续绘制，否则 eframe 会回收它。
+        if !allow_focus && !self.dialog_presented {return;}
+        let Some(Ok(Some(release))) = self.result.clone() else {self.dialog_presented=false;return;};
+        let focus = allow_focus && std::mem::take(&mut self.focus_requested);
         let logo = self.logo.get_or_insert_with(|| {
             let icon = theme::app_icon();
             ctx.load_texture("update-logo", egui::ColorImage::from_rgba_unmultiplied([icon.width as usize,icon.height as usize],&icon.rgba),egui::TextureOptions::LINEAR)
         }).id();
         let installing = self.rx.is_some() && self.cancel.is_none();
+        self.dialog_presented=true;
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("daozai-update"),
             egui::ViewportBuilder::default().with_title("岛仔更新").with_icon(theme::app_icon())
                 .with_inner_size([520.0, 416.0]).with_resizable(false).with_decorations(false)
@@ -541,12 +551,84 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_capture_defers_update_dialog_focus_until_cleanup() {
+        let _g=crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        let ctx=egui::Context::default();crate::theme::load_fonts(&ctx);ctx.set_embed_viewports(false);
+        egui::Context::set_immediate_viewport_renderer(|ctx,mut viewport|{
+            let id=viewport.ids.this;
+            let mut raw=egui::RawInput {viewport_id:id,screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(520.0,416.0))),..Default::default()};
+            raw.viewports.insert(id,egui::ViewportInfo::default());
+            let _=ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx));
+        });
+        let mut state=State::default();state.dialog_open=true;state.focus_requested=true;
+        state.result=Some(Ok(Some(Release {version:"v0.6.50".into(),notes:String::new(),page:RELEASES.into(),package:None})));
+        let id=egui::ViewportId::from_hash_of("daozai-update");
+        let initial=ctx.run(Default::default(),|ctx|state.dialog_ui(ctx,true));
+        let mut existing_builder=initial.viewport_output[&id].builder.clone();
+        // 实际 egui patch 是 eframe 判断是否销毁窗口的依据。旧版动态 active
+        // 在截图开始、结束两个边界都会要求重建，不能只断言单帧 Focus 命令。
+        let mut old_builder=existing_builder.clone().with_active(true);
+        assert!(old_builder.patch(existing_builder.clone().with_active(false)).1);
+        assert!(old_builder.patch(existing_builder.clone().with_active(true)).1);
+        state.focus_requested=true;
+        for allowed in [false,false,true,true] {
+            let pending=state.focus_requested;
+            let output=ctx.run(Default::default(),|ctx|state.dialog_ui(ctx,allowed));
+            let viewport=&output.viewport_output[&id];
+            let (delta,recreate_window)=existing_builder.patch(viewport.builder.clone());
+            assert!(!recreate_window,"截图开始和结束都必须保留更新窗口");
+            assert!(!delta.iter().any(|cmd|matches!(cmd,egui::ViewportCommand::Focus|egui::ViewportCommand::Visible(false))),"builder 更新不能隐藏窗口或隐式抢焦点");
+            assert!(!delta.iter().chain(viewport.commands.iter()).any(|cmd|matches!(cmd,
+                egui::ViewportCommand::OuterPosition(..)|egui::ViewportCommand::InnerSize(..)
+                |egui::ViewportCommand::MinInnerSize(..)|egui::ViewportCommand::MaxInnerSize(..)
+                |egui::ViewportCommand::ResizeIncrements(..))),"截图不得重置窗口位置或尺寸");
+            assert_eq!(viewport.commands.iter().any(|cmd|matches!(cmd,egui::ViewportCommand::Focus)),allowed && pending);
+            assert!(!viewport.commands.iter().any(|cmd|matches!(cmd,egui::ViewportCommand::Visible(false))));
+            assert!(state.dialog_open);
+            assert_eq!(state.focus_requested,pending && !allowed);
+        }
+    }
+
+    #[test]
+    fn screenshot_capture_defers_async_update_window_creation() {
+        let _g=crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        let ctx=egui::Context::default();crate::theme::load_fonts(&ctx);ctx.set_embed_viewports(false);
+        egui::Context::set_immediate_viewport_renderer(|ctx,mut viewport|{
+            let id=viewport.ids.this;
+            let mut raw=egui::RawInput {viewport_id:id,screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(520.0,416.0))),..Default::default()};
+            raw.viewports.insert(id,egui::ViewportInfo::default());
+            let _=ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx));
+        });
+        let mut state=State::default();let id=egui::ViewportId::from_hash_of("daozai-update");
+        // 重复一次关闭后再检查，覆盖已呈现标记不能残留到下一次结果。
+        for _ in 0..2 {
+            let (tx,rx)=mpsc::channel();state.rx=Some(rx);
+            tx.send(Event::Checked(Ok(Some(Release {version:"v0.6.50".into(),notes:String::new(),page:RELEASES.into(),package:None})))).unwrap();
+            for _ in 0..2 {
+                let output=ctx.run(Default::default(),|ctx|{state.poll(ctx);state.dialog_ui(ctx,false);});
+                assert!(!output.viewport_output.contains_key(&id),"异步检查完成时不能在截图中首次创建更新窗口");
+                assert!(state.dialog_open && state.focus_requested && !state.dialog_presented);
+            }
+            for expected_focus in [true,false] {
+                let output=ctx.run(Default::default(),|ctx|state.dialog_ui(ctx,true));
+                let viewport=&output.viewport_output[&id];
+                assert_eq!(viewport.commands.iter().any(|cmd|matches!(cmd,egui::ViewportCommand::Focus)),expected_focus);
+                assert!(state.dialog_presented && !state.focus_requested);
+            }
+            state.dismiss();
+            let output=ctx.run(Default::default(),|ctx|state.dialog_ui(ctx,false));
+            assert!(!output.viewport_output.contains_key(&id));
+            assert!(!state.dialog_open && !state.dialog_presented && !state.focus_requested);
+        }
+    }
+
+    #[test]
     fn dismissing_update_dialog_cancels_download_and_keeps_release_available() {
-        let mut state = State::default(); state.dialog_open = true;
+        let mut state = State::default(); state.dialog_open = true;state.dialog_presented=true;state.focus_requested=true;
         state.result = Some(Ok(Some(Release { version: "v0.6.40".into(), notes: String::new(), page: RELEASES.into(), package: None })));
         let cancel = Arc::new(AtomicBool::new(false)); state.cancel = Some(cancel.clone());
         state.dismiss();
-        assert!(!state.dialog_open); assert!(cancel.load(Ordering::Relaxed));
+        assert!(!state.dialog_open && !state.dialog_presented && !state.focus_requested); assert!(cancel.load(Ordering::Relaxed));
         assert!(matches!(state.result, Some(Ok(Some(_)))));
     }
 

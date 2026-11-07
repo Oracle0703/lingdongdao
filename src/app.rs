@@ -39,9 +39,14 @@ pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
 pub const WIN_H: f32 = 270.0;
 pub(crate) const SALARY_PAGE: usize = 8;
-pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "工资"];
+/// 功能页数量。新增页面时改这里，并补齐下面三个数组和 `Settings` 的默认值（数组长度不符会编译失败）。
+pub(crate) const PAGE_COUNT: usize = 10;
+pub const SCREENSHOT_PAGE: usize = 9;
+pub(crate) const PAGE_NAMES: [&str; PAGE_COUNT] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "工资", "截图"];
 /// 各页面齿轮对应的设置分组。
-pub(crate) const PAGE_SETTINGS_TABS: [usize; 9] = [1, 2, 3, 5, 4, 7, 11, 8, crate::salary_ui::SETTINGS_TAB];
+pub(crate) const PAGE_SETTINGS_TABS: [usize; PAGE_COUNT] = [1, 2, 3, 5, 4, 7, 11, 8, crate::salary_ui::SETTINGS_TAB, crate::screenshot_ui::SETTINGS_TAB];
+/// 设置 → 功能页面里每页的说明。
+pub(crate) const PAGE_DESCRIPTIONS: [&str; PAGE_COUNT] = ["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","按月薪实时计算今日收入","区域截图、历史浏览与复制拖出"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -64,6 +69,8 @@ mod mail_regressions;
 
 #[path = "mail_preview.rs"]
 mod mail_preview;
+#[path = "screenshot_preview.rs"]
+mod screenshot_preview;
 
 pub struct Options {
     /// 是否联网查歌词（录制/测试时关掉）。
@@ -152,6 +159,18 @@ pub enum Cmd {
     CalendarMonth(chrono::NaiveDate),
     /// 断开并删除日历配置（凭据由界面删除）。
     CalendarForget,
+    /// 开始一次区域截图（截图页的按钮）。
+    BeginScreenshot,
+    /// 打开文件夹选择框，设置截图保存位置。
+    ScreenshotChooseFolder,
+    /// 把这张截图复制到剪贴板（后台解码）。
+    ScreenshotCopy(PathBuf),
+    /// 把这张截图移入回收站（已在岛上确认）。
+    ScreenshotDelete(PathBuf),
+    /// 保存失败后：按当前设置的目录重试 / 复制未保存的截图 / 放弃。
+    ScreenshotRetrySave,
+    ScreenshotCopyFailed,
+    ScreenshotDiscardFailed,
 }
 
 pub struct FrameOut {
@@ -222,6 +241,7 @@ pub(crate) struct MailState {
     pub open_uid: Option<(String, u32)>,
     pub reading: Option<mail::Item>,
     pub reader_focus: bool,
+    pub reader_presented: bool,
     /// 已经提醒过的会议，键是 `UID + DTSTART`（邮件和日历两条来源共用）。
     pub fired: std::collections::HashSet<String>,
 }
@@ -326,6 +346,10 @@ pub struct App {
     /// 前台切换导致的强制收起：光标离开前不再自动展开。
     pub hover_lock: bool,
     pub(crate) reveal: f32,
+    /// 框选期间只推进后台状态，不让岛参与鼠标交互或自动弹出。
+    screenshot_capturing: bool,
+    screenshot_deferred_mail: Option<mail::Item>,
+    screenshot_deferred_cmds: Vec<Cmd>,
 
     // 切页
     pub(crate) page: usize,
@@ -333,7 +357,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 9],
+    dots: [Spring; PAGE_COUNT],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -386,6 +410,11 @@ pub struct App {
     forced_open_until:f64,
     pub settings_open:bool,
     pub displays:Vec<crate::display_layout::Display>,
+    /// 当前屏幕允许的最大岛的大小（百分比），由外壳按岛所在屏幕更新，供设置页提示。
+    pub ui_scale_max:u16,
+    /// 截图快捷键：当前生效的显示文字（未生效为空）与设置页里的状态说明，由外壳根据托盘注册结果更新。
+    pub(crate) screenshot_hotkey_label: String,
+    pub(crate) screenshot_hotkey_status: String,
     browser_at_top:bool,
     browser_minimal_active:bool,
     pub(crate) settings_focus_requested:bool,
@@ -441,6 +470,8 @@ pub struct App {
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
     pub(crate) salary: crate::salary_ui::State,
+    /// 截图图库与截图后的自动预览。
+    pub(crate) shots: crate::screenshot_ui::Gallery,
 }
 
 impl App {
@@ -475,6 +506,9 @@ impl App {
             leave_since: None,
             hover_lock: false,
             reveal: 0.0,
+            screenshot_capturing: false,
+            screenshot_deferred_mail: None,
+            screenshot_deferred_cmds: Vec::new(),
             page: initial_page,
             page_from: initial_page,
             page_dir: 1.0,
@@ -516,7 +550,7 @@ impl App {
             music_sources: Vec::new(),
             music_sources_open: false,
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, displays:Vec::new(), ui_scale_max:150, screenshot_hotkey_label:String::new(), screenshot_hotkey_status:String::new(), browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, pet: Default::default(), last_drink: None,
@@ -542,6 +576,7 @@ impl App {
             llm: Default::default(),
             resident: Default::default(), resident_power:(None,false),
             salary: crate::salary_ui::State::load(),
+            shots: Default::default(),
         }
     }
 
@@ -586,6 +621,7 @@ impl App {
         match ev {
             mail::Event::MailboxReset { account } => {
                 if !watching(&account) {return;}
+                if self.screenshot_deferred_mail.as_ref().is_some_and(|p|p.account.eq_ignore_ascii_case(&account)) {self.screenshot_deferred_mail=None;}
                 if self.mail.preview.as_ref().is_some_and(|p|p.item.account.eq_ignore_ascii_case(&account)) {self.end_mail_preview(true);}
                 self.mail.recent.retain(|item| !item.account.eq_ignore_ascii_case(&account));
                 self.mail.invitations.reset(&account);
@@ -619,7 +655,9 @@ impl App {
                 self.mail.digests.retain(self.mail.recent.iter().chain(self.mail.reading.as_ref()));
                 self.mail.privacy.retain(&self.mail.recent);
                 if new && first_delivery {
-                    self.start_mail_preview(self.mail.recent[0].clone());
+                    if self.screenshot_capturing {
+                        if self.mail.recent[0].code.is_some() {self.screenshot_deferred_mail=Some(self.mail.recent[0].clone());}
+                    } else {self.start_mail_preview(self.mail.recent[0].clone());}
                 }
                 if new && self.settings.mail_enabled {
                     let item=&self.mail.recent[0];
@@ -1000,6 +1038,7 @@ impl App {
     }
 
     pub fn show_page(&mut self,page:usize) {
+        if self.screenshot_capturing {return;}
         self.end_mail_preview(false);
         if !self.settings.visible_pages[page] {
             self.settings_tab=PAGE_SETTINGS_TABS[page];
@@ -1052,7 +1091,47 @@ impl App {
         self.adding || self.editing.is_some() || self.task_dialog.is_some() || self.calendar.draft.is_some()
     }
 
+    /// 截图必须先进入此状态，再排除岛窗口并取帧。已有草稿和独立窗口保留。
+    pub fn begin_screenshot(&mut self) -> bool {
+        if self.screenshot_capturing {return false;}
+        if self.drag_hot || self.task_dialog.is_some() {
+            self.say("请先完成当前拖放或任务对话框，再开始截图");
+            return false;
+        }
+        self.screenshot_capturing=true;
+        self.open=false;
+        self.hover_since=None;
+        self.leave_since=None;
+        self.forced_open_until=0.0;
+        self.wheel_delta=0.0;
+        self.notice_details=false;
+        let (width,height)=self.base_size();
+        self.w.snap(width);
+        self.h.snap(height);
+        self.reveal=0.0;
+        true
+    }
+
+    /// 所有完成、取消和失败路径共用；保存 PNG 不必保持截图状态。
+    pub fn end_screenshot(&mut self) {
+        if !self.screenshot_capturing {return;}
+        self.screenshot_capturing=false;
+        self.hover_lock=false;
+        self.hover_since=None;
+        self.leave_since=None;
+        self.pending.append(&mut self.screenshot_deferred_cmds);
+        if let Some(item)=self.screenshot_deferred_mail.take() {
+            // 截图中可能移除了账号、重置了邮箱或更新了同一封邮件。
+            let current=self.mail.recent.iter().find(|m|m.uid==item.uid && m.account.eq_ignore_ascii_case(&item.account))
+                .filter(|m|self.mail.accounts.iter().any(|a|a.enabled && a.email.eq_ignore_ascii_case(&m.account))).cloned();
+            if let Some(item)=current {self.start_mail_preview(item);}
+        }
+    }
+
+    pub fn is_screenshot_capturing(&self) -> bool {self.screenshot_capturing}
+
     pub fn foreground_changed(&mut self) {
+        if self.screenshot_capturing {return;}
         self.hover_lock=true;
         if self.adding && self.buf.trim().is_empty(){self.cancel_edit();}
     }
@@ -1217,7 +1296,9 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
+        if self.shots.preview.is_some() {return crate::screenshot_ui::HEIGHT;}
         if self.mail.preview.is_some() {return mail_preview::HEIGHT;}
+        if self.page==SCREENSHOT_PAGE {return crate::screenshot_ui::HEIGHT;}
         if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
@@ -1225,8 +1306,10 @@ impl App {
     // 每帧入口
     // ---------------------------------------------------------------
     pub fn frame(&mut self, ui: &mut egui::Ui, win: Rect, env: &Env) -> FrameOut {
+        if self.screenshot_capturing {ui.disable();}
         let ctx = ui.ctx().clone();
         self.mail.digests.poll();
+        self.poll_screenshots(&ctx);
         let dt = match self.last_t {
             Some(t0) => (env.t - t0).clamp(0.0, 0.1) as f32,
             None => 0.0,
@@ -1249,7 +1332,7 @@ impl App {
         }
         self.browser_minimal_active=browser_minimal;
         self.tick_mail_preview();
-        if self.mail.preview.is_some() && ctx.input(|i|i.key_pressed(egui::Key::Escape)) {self.end_mail_preview(true);}
+        if !self.screenshot_capturing && self.mail.preview.is_some() && ctx.input(|i|i.key_pressed(egui::Key::Escape)) {self.end_mail_preview(true);}
         if !self.started {
             self.started = true;
             self.last_input = env.t;
@@ -1266,7 +1349,7 @@ impl App {
         self.tick(env, dt, elapsed);
         self.salary_tick(env);
         self.sync_device(env);
-        self.tick_alerts();
+        if !self.screenshot_capturing {self.tick_alerts();}
         let hud_active=self.notice.clone();
         if hud_active.as_ref().map(|a|&a.title)!=self.hud_notice.as_ref().map(|a|&a.title)||hud_active.is_none(){self.notice_details=false;}
         if let Some(a)=&hud_active {self.hud_notice=Some(a.clone());}
@@ -1295,6 +1378,7 @@ impl App {
 
         // ---------- 输入：拖放 ----------
         let (hovering_files, dropped) = ctx.input(|i| {
+            if self.screenshot_capturing {return (false,Vec::new());}
             (
                 self.settings.visible_pages[3] && !i.raw.hovered_files.is_empty(),
                 i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>(),
@@ -1322,21 +1406,31 @@ impl App {
         // ---------- 输入：悬停 ----------
         let p_prev = self.progress();
         let hit = self.hit_rect(cx, top, p_prev);
-        let inside = env.cursor.is_some_and(|c| hit.contains(c));
+        let inside = !self.screenshot_capturing && env.cursor.is_some_and(|c| hit.contains(c));
         let on_notice=env.cursor.is_some_and(|c|self.notice_rect(cx,top).is_some_and(|r|r.contains(c))||self.notice_details_rect(cx,top).is_some_and(|r|r.contains(c)));
         if !inside {
             self.hover_lock = false;
         }
+        self.tick_screenshot_preview(inside);
         if env.cursor != self.last_cursor || ctx.input(|i| !i.events.is_empty()) {
             if inside || hovering_files || ctx.input(|i| !i.events.is_empty()) {
                 self.last_input = env.t;
             }
             self.last_cursor = env.cursor;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
+        if !self.screenshot_capturing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
-        if self.mail.preview.is_none() && !self.is_editing() && inside && self.open && self.reveal > 0.95 {
+        // 截图页和截图预览里，方向键、滚轮和触控板横滑用来切换截图，不翻页（标题行的滚轮除外）。
+        let gallery_input = self.shots.preview.is_some() || self.page==SCREENSHOT_PAGE && self.subpage.is_none() && self.mail.preview.is_none();
+        let mut gallery_handled = false;
+        if gallery_input && !self.is_editing() && inside && self.open && self.reveal > 0.95 {
+            let (scroll_y, scroll_x, left, right) = ctx.input(|i| (i.raw_scroll_delta.y, i.raw_scroll_delta.x, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight)));
+            let cursor = env.cursor.map(|c| c - Vec2::new(cx - PW / 2.0, top));
+            gallery_handled = self.screenshot_input(cursor, scroll_y, scroll_x, left, right) || self.shots.preview.is_some();
+            if gallery_handled { self.wheel_delta = 0.0; }
+        }
+        if !gallery_handled && self.mail.preview.is_none() && !self.is_editing() && inside && self.open && self.reveal > 0.95 {
             let (scroll, left, right, esc) = ctx.input(|i| (i.raw_scroll_delta.y, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
             if esc { self.hover_lock = true; }
             if left || right {
@@ -1382,7 +1476,7 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = self.mail.preview.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
+        let want = !self.screenshot_capturing && (self.shots.preview.is_some() || self.mail.preview.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open));
         // 悬停在收起的工资金额上展开时，直接打开工资页。
         let salary_hover=!self.open && self.salary_bar_visible()
             && env.cursor.is_some_and(|c|(c.x-(cx+self.resident.position(bar::SALARY))).abs()<=bar::SALARY_WIDTH/2.0+6.0 && c.y-top<=BAR_H+4.0);
@@ -1535,15 +1629,26 @@ impl App {
         let mut repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
         // 上班中金额可见时，对齐系统时钟的下一次跳秒，保证金额每秒都更新。
         if let Some(wait)=self.salary_next_tick(salary_visible) {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64(wait));}
+        if let Some(preview)=&self.shots.preview {
+            // 倒计时每秒刷新；悬停后离开要在离开缓冲（0.12 秒）内收起，所以悬停期间多刷新几次。
+            let wait=match preview.until {Some(until)=>(until-self.t).fract().max(0.02),None=>0.05};
+            repaint_after=repaint_after.min(std::time::Duration::from_secs_f64(wait));
+        }
         if let Some(preview)=&self.mail.preview {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64((preview.until-self.t).max(0.0)));}
         cmds.append(&mut self.pending);
+        if self.screenshot_capturing {
+            cmds.retain(|cmd| {
+                if matches!(cmd,Cmd::Notify(..)) {self.screenshot_deferred_cmds.push(cmd.clone());false}
+                else {!matches!(cmd,Cmd::Focus)}
+            });
+        }
         FrameOut {
             region: rel(floating_toast.map_or(region,|toast|region.union(toast)).intersect(ui.max_rect())),
-            hit: rel(self.hit_rect(cx, top, self.progress())),
-            notice_hit:notice_shape.map(|r|rel(notice_details.map_or(r,|details|r.union(details)))),
-            file_drop_zone:self.settings.visible_pages[3].then(||rel(Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0)))),
+            hit: if self.screenshot_capturing {Rect::from_min_size(Pos2::ZERO,Vec2::ZERO)}else{rel(self.hit_rect(cx, top, self.progress()))},
+            notice_hit:notice_shape.filter(|_|!self.screenshot_capturing).map(|r|rel(notice_details.map_or(r,|details|r.union(details)))),
+            file_drop_zone:(!self.screenshot_capturing && self.settings.visible_pages[3]).then(||rel(Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0)))),
             expanded: self.open,
-            editing: self.is_editing(),
+            editing: !self.screenshot_capturing && self.is_editing(),
             animating,
             repaint_after,
             cmds,
@@ -1767,6 +1872,7 @@ impl App {
     // 面板主体：页标题 + 页面（带切页过渡）+ 翻页箭头 + 页码豆
     // ---------------------------------------------------------------
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
+        if self.draw_screenshot_preview(c,cmds) {return;}
         if self.draw_mail_preview(c,cmds) {return;}
         let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(format!("打开{}设置窗口",PAGE_NAMES[self.page]));
         let (hover,press)=c.hover_t(&settings);
@@ -1814,6 +1920,7 @@ impl App {
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
             SALARY_PAGE => ("今日", "工资", theme::YELLOW),
+            SCREENSHOT_PAGE => ("截图", "", theme::WHITE),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -1825,14 +1932,17 @@ impl App {
     fn nav(&mut self, c: &Card) {
         let pages: Vec<_>=self.settings.page_order.iter().copied().filter(|page|self.settings.visible_pages[*page]).collect();
         if pages.len()<2 { return; }
-        let l = c.hit(8.0, 55.0, 26.0, 26.0, "nav-l");
-        let r = c.hit(385.0, 55.0, 26.0, 26.0, "nav-r");
-        let (lh, lp) = c.hover_t(&l);
-        let (rh, rp) = c.hover_t(&r);
-        paint::chevron(c, 21.0, 68.0, -1.0, lh, lp);
-        paint::chevron(c, 398.0, 68.0, 1.0, rh, rp);
-        if l.clicked() { self.navigate_page(false); }
-        if r.clicked() { self.navigate_page(true); }
+        // 截图页的左右箭头用来切换截图，不画翻页箭头；用页码豆或标题行滚轮翻页。
+        if self.page != SCREENSHOT_PAGE {
+            let l = c.hit(8.0, 55.0, 26.0, 26.0, "nav-l");
+            let r = c.hit(385.0, 55.0, 26.0, 26.0, "nav-r");
+            let (lh, lp) = c.hover_t(&l);
+            let (rh, rp) = c.hover_t(&r);
+            paint::chevron(c, 21.0, 68.0, -1.0, lh, lp);
+            paint::chevron(c, 398.0, 68.0, 1.0, rh, rp);
+            if l.clicked() { self.navigate_page(false); }
+            if r.clicked() { self.navigate_page(true); }
+        }
         // 页码豆：宽度由弹簧驱动，整行实时居中；当前页是白色长条
         let gap = 4.0;
         let dot_y=self.expanded_height()-7.2;
@@ -1872,6 +1982,7 @@ impl App {
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
             SALARY_PAGE => self.page_salary(c),
+            SCREENSHOT_PAGE => self.page_screenshot(c, env, cmds),
             _ => self.page_settings(c),
         }
     }

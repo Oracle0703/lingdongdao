@@ -4,13 +4,17 @@ use eframe::egui::{self,Color32};
 
 impl App {
     pub fn mail_reader_ui(&mut self,ctx:&egui::Context) {
-        let Some(raw)=self.mail.reading.clone() else{return};
+        let Some(raw)=self.mail.reading.clone() else{self.mail.reader_presented=false;return};
+        let allow_focus=!self.is_screenshot_capturing();
+        // 新建视口也可能激活窗口；仅延后首次呈现，已有阅读窗口仍需每帧绘制。
+        if !allow_focus && !self.mail.reader_presented {return;}
         let hidden=self.mail_code_hidden(&raw);
         let item=self.display_mail(&raw);
         let mut reveal=false;
-        let focus=std::mem::take(&mut self.mail.reader_focus);
+        let focus=allow_focus && std::mem::take(&mut self.mail.reader_focus);
         let (mut close,mut link)=(false,None);
         let mut toggle=None;
+        self.mail.reader_presented=true;
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("daozai-mail-reader"),
             egui::ViewportBuilder::default().with_title("邮件全文 · 岛仔").with_inner_size([700.0,620.0]).with_min_inner_size([500.0,380.0]),|ctx,_|{
             if focus{ctx.send_viewport_cmd(egui::ViewportCommand::Focus);}
@@ -65,7 +69,7 @@ impl App {
         });
         if reveal{self.reveal_mail_code(&raw);ctx.request_repaint();}
         if let Some(event)=toggle{self.toggle_mail_event(&event);}
-        if close{self.mail.reading=None;}
+        if close{self.mail.reading=None;self.mail.reader_presented=false;}
         if let Some(url)=link{self.pending.push(Cmd::OpenUrl(url));ctx.request_repaint();}
     }
 }

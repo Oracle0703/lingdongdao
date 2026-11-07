@@ -198,6 +198,7 @@ unsafe fn apply_style(hwnd: HWND, editing: bool, raise: bool) {
 
 pub struct Window {
     hwnd: HWND,
+    screenshot_capturing: bool,
     region: (i32, i32, i32, i32),
     expanded: bool,
     hook: HWINEVENTHOOK,
@@ -223,7 +224,20 @@ impl Window {
                 WINEVENT_OUTOFCONTEXT,
             )
         };
-        Some(Self { hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default() })
+        Some(Self { hwnd, screenshot_capturing: false, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default() })
+    }
+
+    pub fn hwnd(&self) -> HWND { self.hwnd }
+
+    /// 岛窗口所在屏幕的系统缩放（不含“岛的大小”额外倍数），例如 200% 时为 2.0。
+    pub fn dpi_scale(&self) -> f32 {
+        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd) };
+        if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+    }
+
+    /// 框选期间只更新绘制与命中区，不能重新置顶压住截图遮罩。
+    pub fn set_screenshot_capturing(&mut self, capturing: bool) {
+        self.screenshot_capturing = capturing;
     }
 
     /// 使用目标屏幕的物理坐标定位，并在缩放或屏幕连接变化后重新校正。
@@ -290,8 +304,10 @@ impl Window {
                 }
             }
         }
-        unsafe { apply_style(self.hwnd, editing, expanded && !self.expanded) };
-        self.expanded = expanded;
+        if !self.screenshot_capturing {
+            unsafe { apply_style(self.hwnd, editing, expanded && !self.expanded) };
+        }
+        self.expanded = expanded && !self.screenshot_capturing;
     }
 }
 
@@ -354,7 +370,7 @@ mod tests {
             assert!(above(cover.0,island.0),"先复现其他窗口盖住岛体");
             let foreground=GetForegroundWindow();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
-            let mut native=Window{hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default()};
+            let mut native=Window{hwnd:island.0,screenshot_capturing:false,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default()};
             let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,1.0,false,expanded);
             update(&mut native,true);
             assert!(above(island.0,cover.0),"展开时必须重新抬高实际窗口层级，不能只检查置顶标记");
@@ -364,6 +380,11 @@ mod tests {
             assert!(above(cover.0,island.0),"展开后不能每帧与其他弹窗争抢层级");
             update(&mut native,false);
             assert!(above(cover.0,island.0),"收起时不抬高层级");
+            native.set_screenshot_capturing(true);
+            update(&mut native,true);
+            assert!(above(cover.0,island.0),"截图期间即使收到展开请求也不能盖住遮罩");
+            assert_eq!(GetForegroundWindow(),foreground,"截图期间不能抢焦点");
+            native.set_screenshot_capturing(false);
             // 模拟只剩置顶标记、实际顺序落在普通窗口后面的情况。
             SetWindowPos(island.0,HWND_NOTOPMOST,0,0,0,0,flags).unwrap();
             SetWindowPos(cover.0,HWND_NOTOPMOST,0,0,0,0,flags).unwrap();

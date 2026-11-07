@@ -1,6 +1,6 @@
 //! 设置、通知队列与岛仔表情。
 use crate::settings_theme::color as settings_color;
-use crate::app::{App, Cmd, Phase, HUD_TRACK_W, HUD_TRACK_X, HUD_W, PAGE_NAMES};
+use crate::app::{App, Cmd, Phase, HUD_TRACK_W, HUD_TRACK_X, HUD_W, PAGE_DESCRIPTIONS, PAGE_NAMES};
 use crate::paint::{Card, H};
 use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Rect};
@@ -819,18 +819,19 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
         }).response
     });
 }
-const SETTINGS_GROUPS: [(&str,usize,usize);9] = [
-    ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3), ("工资",13,13),
+const SETTINGS_GROUPS: [(&str,usize,usize);10] = [
+    ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3), ("工资",13,13), ("截图",14,14),
     ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度与模型",11,12), ("关于",9,9),
 ];
 
 impl App {
     pub fn settings_ui(&mut self,ctx:&egui::Context,autostart:bool){
         self.updates.poll(ctx);
-        self.updates.dialog_ui(ctx);
+        self.updates.dialog_ui(ctx,!self.is_screenshot_capturing());
         if !self.settings_open{return;}
         let id=egui::ViewportId::from_hash_of("daozai-settings");
-        let focus_requested=std::mem::take(&mut self.settings_focus_requested);
+        // 框选不能被独立窗口抢焦点；短路保留请求，截图结束后再消费。
+        let focus_requested=!self.is_screenshot_capturing() && std::mem::take(&mut self.settings_focus_requested);
         ctx.show_viewport_immediate(id,egui::ViewportBuilder::default().with_title("岛仔设置").with_icon(theme::app_icon()).with_inner_size([760.0,640.0]).with_min_inner_size([600.0,450.0]).with_visible(false).with_active(false).with_window_level(egui::WindowLevel::Normal),|ctx,_|{
             let dark=self.settings.settings_theme.dark(crate::settings_theme::system_dark(ctx));
             let original_style=ctx.style();
@@ -871,6 +872,7 @@ impl App {
                         4=>egui::include_image!("../assets/settings-icons/system/tasks.svg"),
                         6=>egui::include_image!("../assets/settings-icons/system/notifications.svg"),
                         13=>egui::include_image!("../assets/settings-icons/system/salary.svg"),
+                        14=>egui::include_image!("../assets/settings-icons/system/screenshot.svg"),
                         _=>egui::include_image!("../assets/settings-icons/system/about.svg"),
                     };
                     let icon_bg=egui::Rect::from_center_size(egui::pos2(rect.left()+19.0,rect.center().y),egui::vec2(22.0,22.0));
@@ -880,7 +882,7 @@ impl App {
                 }
             });
             egui::CentralPanel::default().frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(23,27,35),Color32::from_rgb(248,250,253))).inner_margin(egui::Margin::symmetric(18,16))).show(ctx,|ui|{
-                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","大模型","工资"];
+                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","大模型","工资","截图"];
                 ui.label(egui::RichText::new(titles[self.settings_tab.min(titles.len()-1)]).size(21.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,42,62))));
                 if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
                     if start!=end {
@@ -910,6 +912,7 @@ impl App {
                     match self.settings_tab {
                     11=>self.quota_settings(ui),
                     crate::salary_ui::SETTINGS_TAB=>self.salary_settings(ui),
+                    crate::screenshot_ui::SETTINGS_TAB=>self.screenshot_settings(ui),
                     12=>self.llm_settings(ui),
                     10=>{
                         ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
@@ -923,7 +926,6 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","按月薪实时计算今日收入"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -938,7 +940,7 @@ impl App {
                                         ui.painter().circle_filled(rect.center()+egui::vec2(x,y),1.4,settings_color(ctx,Color32::from_gray(155),Color32::from_gray(100)));
                                     }}
                                     handle.on_hover_cursor(egui::CursorIcon::Grab).dnd_set_drag_payload(PageDrag(page));
-                                    ui.add_enabled_ui(can_change,|ui|{setting_row(ui,PAGE_NAMES[page],descriptions[page],&mut visible);});
+                                    ui.add_enabled_ui(can_change,|ui|{setting_row(ui,PAGE_NAMES[page],PAGE_DESCRIPTIONS[page],&mut visible);});
                                 })).inner.response;
                                 if let Some(payload)=row.dnd_hover_payload::<PageDrag>() {
                                     if payload.0!=page {
@@ -1006,6 +1008,16 @@ impl App {
                                 }).response
                             });
                             ui.label(egui::RichText::new(if !self.settings.display_id.is_empty()&&selected.is_none(){"暂时显示在主屏，重新连接所选屏幕后自动恢复。"}else{"显示在所选屏幕顶部中央；断开时暂时回到主屏。"}).size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.separator();
+                            ui.horizontal_wrapped(|ui|{
+                                ui.add_sized([56.0,30.0],egui::Label::new("岛的大小"));
+                                for value in crate::model::UI_SCALES {
+                                    if ui.add_sized([52.0,30.0],egui::SelectableLabel::new(self.settings.ui_scale==value,format!("{value}%"))).clicked(){self.settings.ui_scale=value;}
+                                }
+                            });
+                            let limited=self.settings.ui_scale>self.ui_scale_max;
+                            ui.label(egui::RichText::new(if limited {format!("当前屏幕最多显示到 {}%，换到更大的屏幕后按所选大小显示。",self.ui_scale_max)}
+                                else {"只放大岛，设置和邮件等窗口保持原大小。".to_string()}).size(11.0).color(ui.visuals().weak_text_color()));
                             ui.separator();
                             ui.horizontal(|ui|{
                                 ui.add_sized([56.0,30.0],egui::Label::new("时间制式"));
