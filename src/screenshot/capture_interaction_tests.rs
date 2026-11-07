@@ -82,7 +82,10 @@ fn cancel_button_and_cancel_events_never_select_an_image() {
 
 #[test]
 fn tiny_selection_disables_save_but_can_be_resized_then_confirmed() {
-    let cancel=AtomicBool::new(false);let session=session(&cancel);draw(&session,0,(300,300),(301,301));
+    let cancel=AtomicBool::new(false);let session=session(&cancel);draw(&session,0,(300,300),(400,400));
+    // 拖右下角控制点把选区缩到 1 × 1：仍可调整，但不能保存。
+    session.pointer_down(0,(400,400));session.pointer_move(0,(301,301));session.pointer_up(0,(301,301));
+    assert_eq!(session.interaction.get().selection.unwrap().rect,PixelRect {left:300,top:300,right:301,bottom:301});
     session.confirm();assert!(session.outcome.get().is_none());
     let point=center(toolbar(&session).save);session.pointer_down(0,point);session.pointer_up(0,point);
     assert!(session.outcome.get().is_none());
@@ -118,7 +121,10 @@ fn eight_controls_flip_and_move_use_original_drag_anchor_and_locked_bounds() {
 fn outside_reselection_switches_screen_and_uses_that_screens_dpi() {
     let cancel=AtomicBool::new(false);let session=session(&cancel);draw(&session,0,(200,200),(600,500));
     session.pointer_down(0,(900,700));
-    assert!(!session.interaction.get().selection.unwrap().adjustable);session.pointer_up(0,(1000,750));
+    assert!(session.interaction.get().selection.unwrap().adjustable,"按下还没拖动时保留原选区");
+    session.pointer_move(0,(1000,750));
+    assert!(!session.interaction.get().selection.unwrap().adjustable,"拖动超过抖动阈值才开始画新框");session.pointer_up(0,(1000,750));
+    assert_eq!(session.interaction.get().selection.unwrap().rect,PixelRect {left:900,top:700,right:1000,bottom:750});
     session.pointer_down(1,(50,50));session.pointer_move(1,(450,350));session.pointer_up(1,(450,350));
     let selected=session.interaction.get().selection.unwrap();assert_eq!(selected.monitor,1);
     assert_eq!((selected.rect.width(),selected.rect.height()),(400,300),"200% DPI 不倍乘选区物理像素");
@@ -149,4 +155,30 @@ fn signed_mouse_message_coordinates_and_flipped_resize_cursors_are_correct() {
     assert_eq!(cursor_for_hit(Hit::Grip(transformed_grip(Grip::NorthWest,rect,(100,100),(600,100)))),IDC_SIZENESW);
     assert_eq!(cursor_for_hit(Hit::Grip(transformed_grip(Grip::NorthWest,rect,(100,100),(600,500)))),IDC_SIZENWSE);
     assert_eq!(cursor_for_hit(Hit::Inside),IDC_SIZEALL);assert_eq!(cursor_for_hit(Hit::Save),IDC_HAND);
+}
+
+#[test]
+fn stray_click_or_tiny_drag_outside_keeps_the_adjusted_selection() {
+    let cancel=AtomicBool::new(false);let session=session(&cancel);draw(&session,0,(200,200),(600,500));
+    let kept=session.interaction.get().selection.unwrap();
+    // 单击、抖动、拖出 1 像素宽的细条：都恢复原选区，不出现 0 尺寸工具栏。
+    for (down,up) in [((900,700),(900,700)),((900,700),(903,702)),((900,700),(1100,701))] {
+        session.pointer_down(0,down);session.pointer_move(0,up);session.pointer_up(0,up);
+        assert_eq!(session.interaction.get().selection,Some(kept),"{down:?}→{up:?}");
+        assert!(session.interaction.get().gesture.is_none());assert!(session.outcome.get().is_none());
+    }
+    // 在另一块屏误点也不丢。
+    session.pointer_down(1,(50,50));session.pointer_up(1,(50,50));
+    assert_eq!(session.interaction.get().selection,Some(kept));
+}
+
+#[test]
+fn stray_click_before_any_selection_returns_to_the_hint() {
+    let cancel=AtomicBool::new(false);let session=session(&cancel);
+    session.pointer_down(0,(300,300));session.pointer_up(0,(300,300));
+    assert_eq!(session.interaction.get().selection,None);
+    let layout=overlay_layout(&session.frames[0],&session.styles.borrow()[0],session.interaction.get().visual()).unwrap();
+    assert!(layout.toolbar.is_none() && layout.handles.is_empty());
+    session.pointer_down(0,(300,300));session.pointer_move(0,(301,340));session.pointer_up(0,(301,340));
+    assert_eq!(session.interaction.get().selection,None,"不足 2 像素宽同样回到提示");
 }

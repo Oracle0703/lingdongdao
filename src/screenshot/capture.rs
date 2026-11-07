@@ -204,7 +204,8 @@ struct Selection { monitor: usize, rect: PixelRect, adjustable: bool }
 struct VisualSelection { selection: Selection, pressed: Option<Button> }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Gesture {
-    Draw { monitor: usize, start: (i32,i32) },
+    /// `previous`：按下前已调整好的选区。误点或拖出不足 2 像素时恢复它，避免误点丢掉选区。
+    Draw { monitor: usize, start: (i32,i32), previous: Option<Selection> },
     Transform { monitor: usize, original: PixelRect, grip: Grip, start: (i32,i32), moved: bool },
     Button { monitor: usize, button: Button, inside: bool },
 }
@@ -233,16 +234,19 @@ impl Interaction {
             Hit::Grip(grip) => self.gesture = self.selection.map(|selected|Gesture::Transform {monitor,original:selected.rect,grip,start:point,moved:false}),
             Hit::Inside => self.gesture = self.selection.map(|selected|Gesture::Transform {monitor,original:selected.rect,grip:Grip::Move,start:point,moved:false}),
             Hit::Toolbar => {},
-            Hit::Outside => {
-                self.selection = Some(Selection {monitor,rect:selection_rect(point,point,bounds.width(),bounds.height()),adjustable:false});
-                self.gesture = Some(Gesture::Draw {monitor,start:point});
-            }
+            // 先不替换原选区：移动超过抖动阈值才开始画新框（见 pointer_move）。
+            Hit::Outside => self.gesture = Some(Gesture::Draw {monitor,start:point,previous:self.selection}),
         }
     }
     fn pointer_move(&mut self, monitor: usize, point: (i32,i32), bounds: PixelRect, metrics: SelectionMetrics) {
         match self.gesture {
-            Some(Gesture::Draw {monitor:locked,start}) if locked == monitor => {
-                self.selection = Some(Selection {monitor,rect:selection_rect(start,point,bounds.width(),bounds.height()),adjustable:false});
+            Some(Gesture::Draw {monitor:locked,start,previous}) if locked == monitor => {
+                let drawing = self.selection.is_some_and(|selected|!selected.adjustable);
+                let delta = (point.0.saturating_sub(start.0),point.1.saturating_sub(start.1));
+                // 已有选区时，移动达到控制点命中容差（100% 下 6 像素）才算开始重选，单击和手抖都不算。
+                if drawing || previous.is_none() && delta != (0,0) || delta.0.unsigned_abs().max(delta.1.unsigned_abs()) >= metrics.hit_padding.max(1) as u32 {
+                    self.selection = Some(Selection {monitor,rect:selection_rect(start,point,bounds.width(),bounds.height()),adjustable:false});
+                }
             }
             Some(Gesture::Transform {monitor:locked,original,grip,start,moved}) if locked == monitor => {
                 let delta = (point.0.saturating_sub(start.0),point.1.saturating_sub(start.1));
@@ -265,8 +269,12 @@ impl Interaction {
         let gesture = self.gesture.take();
         self.last_click_inside = false;
         match gesture {
-            Some(Gesture::Draw {monitor:locked,..}) if locked == monitor => {
-                if let Some(selected) = self.selection.as_mut() { selected.adjustable = true; }
+            Some(Gesture::Draw {monitor:locked,previous,..}) if locked == monitor => {
+                match self.selection.filter(|selected|!selected.adjustable) {
+                    Some(drawn) if drawn.rect.valid() => self.selection = Some(Selection {adjustable:true,..drawn}),
+                    // 误点或不足 2 × 2：恢复原选区；原来没有选区就回到“拖动框选”提示。
+                    _ => self.selection = previous,
+                }
             }
             Some(Gesture::Transform {monitor:locked,grip:Grip::Move,moved,..}) if locked == monitor => {
                 self.last_click_inside = !moved && self.hit(monitor,point,bounds,metrics)==Hit::Inside;

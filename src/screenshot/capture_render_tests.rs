@@ -169,6 +169,8 @@ fn drag_invalidates_only_its_offscreen_monitor_window() {
         assert!(session.outcome.get().is_none(),"松开只显示调整控件，不能开始保存");
         for &hwnd in &windows {assert!(ValidateRect(hwnd,None).as_bool());}
         session.pointer_down(0,(40,40));
+        assert!(!GetUpdateRect(windows[1],None,false).as_bool(),"只按下不拖动时保留旧选区，不重画");
+        session.pointer_move(0,(140,140));
         assert!(GetUpdateRect(windows[0],None,false).as_bool(),"新屏需要绘制新选区");
         assert!(GetUpdateRect(windows[1],None,false).as_bool(),"旧屏的控制点与工具栏必须清除");
     }
