@@ -54,6 +54,9 @@ struct Shell {
     /// 已交给托盘线程注册的截图快捷键（截图页关闭时为 Off）。
     #[cfg(windows)]
     screenshot_hotkey_applied: daozai::tray::ScreenshotHotkey,
+    /// 后台删除截图的结果通道。
+    #[cfg(windows)]
+    screenshot_deletes: (std::sync::mpsc::Sender<(std::path::PathBuf, Result<bool, String>)>, std::sync::mpsc::Receiver<(std::path::PathBuf, Result<bool, String>)>),
     #[cfg(windows)]
     autostart: bool,
     /// v0.5.4：蓝牙音频设备（后台线程推送）与音量回声的静默窗口。
@@ -163,6 +166,8 @@ impl Shell {
             screenshot_notices: Vec::new(),
             #[cfg(windows)]
             screenshot_hotkey_applied: screenshot_hotkey,
+            #[cfg(windows)]
+            screenshot_deletes: std::sync::mpsc::channel(),
             #[cfg(windows)]
             autostart,
             #[cfg(windows)]
@@ -285,17 +290,19 @@ impl Shell {
                     self.end_screenshot();
                     self.screenshot_notices.push(("截图失败".into(), error));
                 }
-                CaptureEvent::Saved { path, images, .. } => {
-                    self.app.screenshot_saved(ctx, &path, images);
+                CaptureEvent::Saved { path, images, seq, .. } => {
+                    // 重试成功：先清掉失败状态，预览按正常的 8 秒显示保存好的图。
                     if self.screenshot.as_ref().is_some_and(|capture| !capture.has_failed()) { self.app.clear_screenshot_failure(false); }
+                    self.app.screenshot_saved(ctx, &path, images, seq);
                 }
                 CaptureEvent::SaveFailed { error, images, pending } => {
                     self.app.screenshot_save_failed(ctx, error.clone(), images, pending);
                     self.screenshot_notices.push(("截图未能保存".into(), error));
                 }
-                CaptureEvent::Copied(result) => self.app.screenshot_copied(result),
+                CaptureEvent::Copied { result, seq } => self.app.screenshot_copied(result, seq),
             }
         }
+        for (path, result) in self.screenshot_deletes.1.try_iter().collect::<Vec<_>>() { self.app.screenshot_deleted(&path, result); }
     }
 
     #[cfg(windows)]
@@ -568,12 +575,16 @@ impl eframe::App for Shell {
                     }
                 },
                 Cmd::ScreenshotDelete(path)=>{
+                    // 移入回收站可能较慢（大文件、网络盘或系统询问），放到后台线程，结果下一帧交给图库。
                     #[cfg(windows)] {
-                        let result=match daozai::screenshot::store::resolve_root(&self.app.settings.screenshot_dir) {
-                            Some(root)=>daozai::screenshot::store::recycle(&root,&path).map(|done|done==daozai::screenshot::store::Recycled::Done),
-                            None=>Err("还没有设置截图保存位置".into()),
-                        };
-                        self.app.screenshot_deleted(&path,result);
+                        let (tx,root,ctx)=(self.screenshot_deletes.0.clone(),self.app.screenshot_root(),ctx.clone());
+                        let _=std::thread::Builder::new().name("daozai-screenshot-delete".into()).spawn(move||{
+                            let result=match root {
+                                Some(root)=>daozai::screenshot::store::recycle(&root,&path).map(|done|done==daozai::screenshot::store::Recycled::Done),
+                                None=>Err("还没有设置截图保存位置".into()),
+                            };
+                            let _=tx.send((path,result));ctx.request_repaint();
+                        });
                     }
                 },
                 Cmd::ScreenshotChooseFolder=>{

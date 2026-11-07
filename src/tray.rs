@@ -418,7 +418,7 @@ fn show_menu_at(hwnd: HWND, ctx: &Ctx, x: i32, y: i32) {
             CMD_ABOUT => about(),
             CMD_EXIT => {
                 // 还有保存失败、只在内存里的截图：退出前提醒，默认按钮是「否」。
-                let unsaved = crate::screenshot::UNSAVED.load(Ordering::Acquire);
+                let unsaved = crate::screenshot::unsaved();
                 if unsaved > 0 {
                     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO};
                     let text = wide(&format!("还有 {unsaved} 张截图没有保存，退出后会丢失。仍要退出吗？"));

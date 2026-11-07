@@ -121,11 +121,11 @@ fn saved_screenshot_expands_for_eight_seconds_without_changing_the_page() {
     let path = store::save_png(&rgba, 1000, 600, &root, time).unwrap();
     let images = std::sync::Arc::new(crate::screenshot::library::images(1000, 600, &rgba));
     let ctx = h.ctx.clone();
-    h.app.screenshot_saved(&ctx, &path, images.clone());
+    h.app.screenshot_saved(&ctx, &path, images.clone(), Some(1));
     for _ in 0..30 { h.frame(vec![]); }
     assert!(h.app.open && h.app.screenshot_preview_active(), "无鼠标悬停也自动展开");
     assert!(text_shown(&h, "截图已保存") && text_shown(&h, "正在复制"));
-    h.app.screenshot_copied(Ok(()));
+    h.app.screenshot_copied(Ok(()), Some(1));
     h.frame(vec![]);
     assert!(text_shown(&h, "已复制到剪贴板"));
     assert_eq!(h.app.page(), crate::app::SALARY_PAGE, "预览不改变原页面");
@@ -137,7 +137,7 @@ fn saved_screenshot_expands_for_eight_seconds_without_changing_the_page() {
     assert!(!h.app.open);
 
     // 悬停后保持展开，离开后收起
-    h.app.screenshot_saved(&ctx, &path, images);
+    h.app.screenshot_saved(&ctx, &path, images, Some(2));
     h.hover(H::local(209.5, 100.0), 10.0);
     assert!(h.app.screenshot_preview_active(), "鼠标在岛上时不收起");
     h.hover(Pos2::new(WIN_W / 2.0, 260.0), 0.5);
@@ -155,7 +155,7 @@ fn editing_a_draft_gets_a_toast_instead_of_the_preview() {
     let rgba = shot(300, 200, 1);
     let path = store::save_png(&rgba, 300, 200, &root, time).unwrap();
     let ctx = h.ctx.clone();
-    h.app.screenshot_saved(&ctx, &path, std::sync::Arc::new(crate::screenshot::library::images(300, 200, &rgba)));
+    h.app.screenshot_saved(&ctx, &path, std::sync::Arc::new(crate::screenshot::library::images(300, 200, &rgba)), Some(1));
     assert!(!h.app.screenshot_preview_active() && h.app.adding, "草稿保留，不弹预览");
 }
 
@@ -182,6 +182,83 @@ fn save_failure_keeps_the_image_and_offers_retry_folder_copy_and_discard() {
     assert!(!h.app.screenshot_preview_active(), "放弃后收起");
     h.app.show_screenshot_failure();
     assert!(!h.app.screenshot_preview_active(), "没有待处理的失败时不展开");
+}
+
+#[test]
+fn copy_result_reaches_the_matching_preview_even_when_it_arrives_first() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    let root = library_with(&mut h, &[]);
+    h.app.settings.notifications = false;
+    h.frame(vec![]);
+    let ctx = h.ctx.clone();
+    let save = |h: &mut H, minute: u32, seq: u64| {
+        let time = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap().and_hms_milli_opt(13, minute, 0, 0).unwrap();
+        let rgba = shot(320, 200, minute as u8);
+        let path = store::save_png(&rgba, 320, 200, &root, time).unwrap();
+        h.app.screenshot_saved(&ctx, &path, std::sync::Arc::new(crate::screenshot::library::images(320, 200, &rgba)), Some(seq));
+    };
+    // 复制结果先到，“已保存”后到：预览一开始就显示已复制。
+    h.app.screenshot_copied(Ok(()), Some(7));
+    save(&mut h, 1, 7);
+    for _ in 0..30 { h.frame(vec![]); }
+    assert!(text_shown(&h, "已复制到剪贴板"));
+    // 下一张截图的复制结果不能落到这张的预览上。
+    h.app.screenshot_copied(Err("剪贴板被占用".into()), Some(8));
+    for _ in 0..30 { h.frame(vec![]); }
+    assert!(text_shown(&h, "已复制到剪贴板") && !text_shown(&h, "未能复制"));
+    save(&mut h, 2, 8);
+    for _ in 0..30 { h.frame(vec![]); }
+    assert!(text_shown(&h, "未能复制"), "第二张的预览显示它自己的复制结果");
+    // 重试保存（没有序号）不显示复制状态。
+    save(&mut h, 3, 0);
+    h.app.screenshot_saved(&ctx, &h.app.shots.entries[0].path.clone(), std::sync::Arc::new(crate::screenshot::library::images(2, 2, &[0; 16])), None);
+    for _ in 0..30 { h.frame(vec![]); }
+    assert!(!text_shown(&h, "正在复制") && !text_shown(&h, "已复制到剪贴板"));
+}
+
+#[test]
+fn idle_page_does_not_rescan_every_second_but_reentering_does() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    library_with(&mut h, &[(400, 300)]);
+    open_page(&mut h);
+    settle(&mut h, |h| h.app.shots.entries.len() == 1 && !h.app.shots.is_scanning());
+    // 空闲时岛每秒才重绘一次：时间跳过 1.5 秒也不能重新扫描（扫描会清理目录，打扰正在进行的保存）。
+    for _ in 0..3 { h.t += 1.5; h.frame(vec![]); assert!(!h.app.shots.is_scanning(), "空闲重绘不应触发扫描"); }
+    // 离开再回来：重新扫描。
+    h.app.show_page(0);
+    for _ in 0..30 { h.frame(vec![]); }
+    h.app.show_page(SCREENSHOT_PAGE);
+    for _ in 0..40 { h.frame(vec![]); if h.app.shots.is_scanning() { break; } }
+    settle(&mut h, |h| !h.app.shots.is_scanning());
+}
+
+#[test]
+fn ending_the_otp_preview_underneath_keeps_the_screenshot_preview_open() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    let root = library_with(&mut h, &[]);
+    h.app.settings.notifications = false;
+    h.frame(vec![]);
+    let time = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap().and_hms_milli_opt(14, 0, 0, 0).unwrap();
+    let rgba = shot(320, 200, 1);
+    let path = store::save_png(&rgba, 320, 200, &root, time).unwrap();
+    let ctx = h.ctx.clone();
+    h.app.screenshot_saved(&ctx, &path, std::sync::Arc::new(crate::screenshot::library::images(320, 200, &rgba)), Some(1));
+    // 截图预览期间收到验证码，然后按 Esc 结束验证码预览（它在截图预览下面）。
+    h.app.mail.accounts = vec![crate::mail::Account { email: "preview@example.com".into(), provider: crate::mail::Provider::Qq, custom: None, enabled: true }];
+    h.app.mail_event_at(crate::mail::Event::Mail { item: crate::mail::Item {
+        account: "preview@example.com".into(), from: "岛仔测试".into(), subject: "确认登录".into(), time: "14:00".into(),
+        received_unix: Some(chrono::Utc::now().timestamp()), code: Some("482913".into()), summary: "验证码 482913".into(),
+        links: vec![], meeting: None, uid: 1 }, new: true, updates: vec![] }, h.t);
+    for _ in 0..30 { h.frame(vec![]); }
+    assert!(h.app.mail.preview.is_some(), "验证码预览照常开始");
+    h.frame(vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+    assert!(h.app.mail.preview.is_none());
+    for _ in 0..20 { h.frame(vec![]); }
+    assert!(h.app.open && h.app.screenshot_preview_active(), "截图预览还在时不能收起岛");
+    assert!((h.app.expanded_height() - crate::screenshot_ui::HEIGHT).abs() < 0.1);
 }
 
 #[test]
@@ -235,8 +312,8 @@ fn screenshot_layout_gallery() {
             let rgba = shot(1440, 900, 2);
             let saved = store::save_png(&rgba, 1440, 900, &root, time).unwrap();
             let ctx = h.ctx.clone();
-            h.app.screenshot_saved(&ctx, &saved, std::sync::Arc::new(crate::screenshot::library::images(1440, 900, &rgba)));
-            if action == "preview-ok" { h.app.screenshot_copied(Ok(())); }
+            h.app.screenshot_saved(&ctx, &saved, std::sync::Arc::new(crate::screenshot::library::images(1440, 900, &rgba)), Some(1));
+            if action == "preview-ok" { h.app.screenshot_copied(Ok(()), Some(1)); }
         } else {
             h.app.show_page(SCREENSHOT_PAGE);
         }
@@ -265,5 +342,41 @@ fn screenshot_layout_gallery() {
         let image = image::RgbaImage::from_raw(cw as u32, ch as u32, rgba).unwrap();
         image::imageops::crop_imm(&image, ((WIN_W - PW) / 2.0 * ppp - 20.0) as u32, 0, (PW * ppp + 40.0) as u32, (262.0 * ppp) as u32).to_image().save(dest.join(format!("{name}.png"))).unwrap();
         raster.free_textures(&out.textures_delta);
+    }
+}
+
+#[test]
+#[ignore = "按需生成设置 → 截图的画面：设置 DAOZAI_SCREENSHOT_PREVIEW 为输出目录"]
+fn screenshot_settings_gallery() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dest = std::path::PathBuf::from(std::env::var_os("DAOZAI_SCREENSHOT_PREVIEW").expect("需指定预览目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    for (name, hotkey, label, status) in [("settings-ok", "alt_a", "Alt + A", "Alt + A 已启用。"),
+        ("settings-conflict", "alt_a", "", "Alt + A 已被其他程序占用（常见是微信截图），请换一个快捷键，或关掉占用它的程序后重新选择。")] {
+        let mut h = H::new();
+        h.app.settings.screenshot_hotkey = hotkey.into();
+        h.app.set_screenshot_hotkey_status(label, status.into());
+        h.app.settings_tab = crate::screenshot_ui::SETTINGS_TAB; h.app.open_settings(); h.ctx.set_embed_viewports(false);
+        let mut raster = crate::preview_raster::Raster::new(760, 640);
+        for frame in 0..4 {
+            let output = std::sync::Arc::new(Mutex::new(None)); let capture = output.clone();
+            let time = frame as f64 * 0.02;
+            egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
+                let id = viewport.ids.this;
+                let raw = egui::RawInput { viewport_id: id, screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(760.0, 640.0))), time: Some(time), viewports: std::iter::once((id, egui::ViewportInfo::default())).collect(), ..Default::default() };
+                *capture.lock().unwrap() = Some(ctx.run(raw, |ctx| (viewport.viewport_ui_cb)(ctx)));
+            });
+            let parent = h.ctx.run(egui::RawInput::default(), |ctx| h.app.settings_ui(ctx, false));
+            let child = output.lock().unwrap().take().unwrap();
+            let mut set: Vec<_> = parent.textures_delta.set.iter().chain(&child.textures_delta.set).cloned().collect();
+            set.sort_by_key(|(_, delta)| delta.pos.is_some());
+            raster.update_textures(&egui::TexturesDelta { set, free: vec![] });
+            if frame == 3 {
+                raster.buf.fill([0.0, 0.0, 0.0, 1.0]);
+                raster.draw(&h.ctx.tessellate(child.shapes, child.pixels_per_point), child.pixels_per_point);
+                let mut rgba = Vec::new(); raster.to_rgba8(&mut rgba);
+                image::save_buffer(dest.join(format!("{name}.png")), &rgba, 760, 640, image::ColorType::Rgba8).unwrap();
+            }
+        }
     }
 }

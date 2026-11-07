@@ -118,10 +118,15 @@ pub fn images(width: u32, height: u32, rgba: &[u8]) -> Images {
     let preview = if (pw, ph) == (width, height) { source.clone() } else { image::imageops::thumbnail(&source, pw, ph) };
     let thumb = {
         let (tw, th) = THUMB_SIZE;
-        let cover = (tw as f32 / width as f32).max(th as f32 / height as f32);
-        let (cw, ch) = (((width as f32 * cover).ceil() as u32).max(tw), ((height as f32 * cover).ceil() as u32).max(th));
-        let scaled = image::imageops::thumbnail(&source, cw, ch);
-        image::imageops::crop_imm(&scaled, (cw - tw) / 2, (ch - th) / 2, tw, th).to_image()
+        let target = tw as f32 / th as f32;
+        let (cw, ch) = if width as f32 / height as f32 > target {
+            (((height as f32 * target).round() as u32).clamp(1, width), height)
+        } else {
+            (width, ((width as f32 / target).round() as u32).clamp(1, height))
+        };
+        let cropped = image::imageops::crop_imm(&source, (width - cw) / 2, (height - ch) / 2, cw, ch).to_image();
+        if cw >= tw && ch >= th { image::imageops::thumbnail(&cropped, tw, th) }
+        else { image::imageops::resize(&cropped, tw, th, image::imageops::FilterType::Triangle) }
     };
     let color = |image: &image::RgbaImage| ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw());
     Images { width, height, preview: color(&preview), thumb: color(&thumb) }
@@ -148,6 +153,9 @@ mod tests {
             assert_eq!(images.thumb.size, [THUMB_SIZE.0 as usize, THUMB_SIZE.1 as usize]);
             assert_eq!((images.width, images.height), (w, h));
         }
+        // 2 像素宽、2160 高的细条：不应生成上百 MB 的中间图（这里只验证结果尺寸）。
+        let strip = images(2, 2160, &vec![3u8; 2 * 2160 * 4]);
+        assert_eq!(strip.thumb.size, [THUMB_SIZE.0 as usize, THUMB_SIZE.1 as usize]);
         let small = images(400, 300, &vec![1u8; 400 * 300 * 4]);
         assert_eq!(small.preview.size, [400, 300], "小图不放大");
     }

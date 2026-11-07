@@ -7,14 +7,16 @@ const DURATION: f64 = 8.0;
 const FAILURE_DURATION: f64 = 20.0;
 
 impl App {
-    pub(crate) fn start_screenshot_preview(&mut self) {
+    /// `seq`：这次截图的序号，用于对应复制结果；保存失败和重试保存时为 `None`。
+    pub(crate) fn start_screenshot_preview(&mut self, seq: Option<u64>) {
         // 正在编辑草稿、拖放文件或任务对话框打开：不弹出，只提示，避免打断或丢失输入。
         if self.is_editing() || self.drag_hot || self.task_dialog.is_some() {
             self.say(if self.shots.failure.is_some() { "截图未能保存：完成当前操作后，再按截图快捷键处理" } else { "截图已保存" });
             return;
         }
         let duration = if self.shots.failure.is_some() { FAILURE_DURATION } else { DURATION };
-        self.shots.preview = Some(crate::screenshot_ui::Preview { until: Some(self.t + duration), copy: None, left_at: None });
+        let copy = self.take_early_copy(seq);
+        self.shots.preview = Some(crate::screenshot_ui::Preview { until: Some(self.t + duration), copy, left_at: None, seq });
         self.open = true;
         self.hover_lock = false;
         self.hover_since = None;

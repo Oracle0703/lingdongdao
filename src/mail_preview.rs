@@ -36,6 +36,8 @@ impl App {
     pub(super) fn end_mail_preview(&mut self,collapse:bool) {
         if self.mail.preview.take().is_none() {return;}
         self.forced_open_until=0.0;
+        // 截图预览还盖在上面：只回到它的高度，不收起岛。
+        if collapse && self.shots.preview.is_some() {self.h.target=self.expanded_height();return;}
         if collapse {
             self.open=false;
             self.hover_lock=true;

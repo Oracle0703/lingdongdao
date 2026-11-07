@@ -1629,7 +1629,11 @@ impl App {
         let mut repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
         // 上班中金额可见时，对齐系统时钟的下一次跳秒，保证金额每秒都更新。
         if let Some(wait)=self.salary_next_tick(salary_visible) {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64(wait));}
-        if let Some(until)=self.shots.preview.as_ref().and_then(|preview|preview.until) {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64((until-self.t).fract().max(0.02)));}
+        if let Some(preview)=&self.shots.preview {
+            // 倒计时每秒刷新；悬停后离开要在离开缓冲（0.12 秒）内收起，所以悬停期间多刷新几次。
+            let wait=match preview.until {Some(until)=>(until-self.t).fract().max(0.02),None=>0.05};
+            repaint_after=repaint_after.min(std::time::Duration::from_secs_f64(wait));
+        }
         if let Some(preview)=&self.mail.preview {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64((preview.until-self.t).max(0.0)));}
         cmds.append(&mut self.pending);
         if self.screenshot_capturing {

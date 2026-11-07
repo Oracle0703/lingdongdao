@@ -62,6 +62,9 @@ fn is_month_dir(name: &str) -> bool {
         && matches!(name[5..].parse::<u8>(), Ok(1..=12))
 }
 
+/// 超过这么久没有修改的 `.part` 才算中断写入的残留；正在保存的文件不会被误删。
+const STALE_PART: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// 列出根目录下各月份文件夹中的截图，最新的在前；顺带删除本功能中断写入留下的 `.part`。
 /// 根目录不存在时返回空列表。不进入符号链接或目录联接。
 pub fn scan(root: &Path) -> std::io::Result<Vec<Entry>> {
@@ -83,7 +86,9 @@ pub fn scan(root: &Path) -> std::io::Result<Vec<Entry>> {
             if let Some(key) = parse_name(name) {
                 entries.push(Entry { path: file.path(), key });
             } else if name.strip_suffix(PART).and_then(parse_name).is_some() {
-                let _ = fs::remove_file(file.path());
+                let stale = file.metadata().and_then(|meta| meta.modified()).ok()
+                    .and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age >= STALE_PART);
+                if stale { let _ = fs::remove_file(file.path()); }
             }
         }
     }
@@ -166,6 +171,14 @@ pub fn owned_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recycled { Done, Declined }
 
+/// 去掉 `canonicalize` 加上的扩展前缀：`\\?\E:\…` → `E:\…`，网络路径 `\\?\UNC\server\…` → `\\server\…`。
+fn shell_path(path: &str) -> String {
+    match path.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => path.strip_prefix(r"\\?\").unwrap_or(path).to_string(),
+    }
+}
+
 /// 移入回收站。`FOF_WANTNUKEWARNING`：盘上没有回收站或文件过大时由系统询问，
 /// 用户拒绝就保留文件，绝不静默永久删除。
 #[cfg(windows)]
@@ -174,7 +187,7 @@ pub fn recycle(root: &Path, path: &Path) -> Result<Recycled, String> {
     use windows::Win32::UI::Shell::{SHFileOperationW, FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW};
     let file = owned_path(root, path)?;
     // SHFileOperation 不接受 `\\?\` 前缀，pFrom 以两个 0 结尾。
-    let text = file.as_os_str().to_string_lossy().trim_start_matches(r"\\?\").to_string();
+    let text = shell_path(&file.as_os_str().to_string_lossy());
     let from: Vec<u16> = std::ffi::OsStr::new(&text).encode_wide().chain([0, 0]).collect();
     let mut operation = SHFILEOPSTRUCTW {
         wFunc: FO_DELETE,
@@ -230,14 +243,19 @@ mod tests {
             fs::write(root.join(month).join(name), b"png").unwrap();
         }
         fs::write(root.join("2026-11").join("我的照片.png"), b"x").unwrap();
-        fs::write(root.join("2026-11").join("截图_20261106_100000_000.png.part"), b"half").unwrap();
+        let stale = root.join("2026-11").join("截图_20261106_100000_000.png.part");
+        fs::write(&stale, b"half").unwrap();
+        fs::File::options().write(true).open(&stale).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600)).unwrap();
+        let writing = root.join("2026-11").join("截图_20261106_100001_000.png.part");
+        fs::write(&writing, b"writing").unwrap();
         fs::write(root.join("2026-11").join("别人的.part"), b"keep").unwrap();
         fs::create_dir_all(root.join("其他文件夹")).unwrap();
         fs::write(root.join("其他文件夹").join("截图_20261201_000000_000.png"), b"x").unwrap();
         fs::write(root.join("截图_20261202_000000_000.png"), b"x").unwrap();
         let names: Vec<_> = scan(&root).unwrap().iter().map(|e| e.path.file_name().unwrap().to_string_lossy().to_string()).collect();
         assert_eq!(names, ["截图_20261106_153012_328_1.png", "截图_20261106_153012_328.png", "截图_20261106_090000_000.png", "截图_20261031_235959_999.png"]);
-        assert!(!root.join("2026-11").join("截图_20261106_100000_000.png.part").exists(), "本功能的 .part 被清理");
+        assert!(!stale.exists(), "中断写入留下的 .part 被清理");
+        assert!(writing.exists(), "正在写入的 .part 不能删，否则会让进行中的保存失败");
         assert!(root.join("2026-11").join("别人的.part").exists(), "不删除别人的文件");
         assert!(root.join("2026-11").join("我的照片.png").exists());
         assert!(scan(&root.join("不存在")).unwrap().is_empty());
@@ -285,6 +303,13 @@ mod tests {
         assert!(owned_path(&root, &traversal).is_ok(), "带 .. 的写法规范化后仍在原位，可以接受");
         fs::remove_dir_all(outside.parent().unwrap()).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shell_paths_drop_the_extended_prefix_including_network_shares() {
+        assert_eq!(shell_path(r"\\?\E:\截图\2026-11\a.png"), r"E:\截图\2026-11\a.png");
+        assert_eq!(shell_path(r"\\?\UNC\nas\shots\2026-11\a.png"), r"\\nas\shots\2026-11\a.png");
+        assert_eq!(shell_path(r"D:\shots\a.png"), r"D:\shots\a.png");
     }
 
     #[test]

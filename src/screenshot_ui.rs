@@ -48,6 +48,8 @@ pub(crate) struct Preview {
     pub copy: Option<Result<(), String>>,
     /// 悬停过之后离开岛的时刻，用于离开缓冲。
     pub left_at: Option<f64>,
+    /// 这次预览对应的截图序号；为 `None`（重试保存、保存失败）时不显示复制状态。
+    pub seq: Option<u64>,
 }
 
 /// 保存失败、图片仍在内存里（设计文档第 5.2 节）。
@@ -66,8 +68,12 @@ pub(crate) struct Gallery {
     generation: u64,
     slots: HashMap<PathBuf, Slot>,
     pending: HashSet<PathBuf>,
-    /// 页面上一次绘制的时刻；隔了一段时间再进入截图页时重新扫描，反映外部的增删。
-    drawn_at: f64,
+    /// 页面上一次绘制时的 egui 帧序号；中间断过（重新进入截图页）就重新扫描，反映外部的增删。
+    drawn_pass: u64,
+    /// 已为当前项把解码请求重新提到队首（快速切图后，当前项不必排在旧请求后面）。
+    boosted: Option<PathBuf>,
+    /// 先于“已保存”到达的自动复制结果：（截图序号，结果）。
+    early_copy: Option<(u64, Result<(), String>)>,
     drag: Option<MainDrag>,
     confirm_delete: Option<PathBuf>,
     swipe_at: f64,
@@ -81,6 +87,10 @@ impl Gallery {
     /// 测试用：直接进入删除确认状态。
     #[cfg(test)]
     pub(crate) fn ask_delete(&mut self) { self.confirm_delete = self.current().map(|entry| entry.path.clone()); }
+
+    /// 是否正在扫描（测试用）。
+    #[cfg(test)]
+    pub(crate) fn is_scanning(&self) -> bool { self.scanning }
 
     /// 已解码可显示的张数（测试用）。
     #[cfg(test)]
@@ -171,6 +181,12 @@ impl Gallery {
         // 先请求当前项，再由近及远；队列后进先出，所以倒序提交。
         let mut order: Vec<usize> = near.collect();
         order.sort_by_key(|index| std::cmp::Reverse(index.abs_diff(self.selected)));
+        let current = self.entries[self.selected].path.clone();
+        if self.pending.contains(&current) && self.boosted.as_ref() != Some(&current) {
+            self.boosted = Some(current.clone());
+            let generation = self.generation;
+            self.library(ctx).request(Request::Decode { path: current, generation });
+        }
         for index in order {
             let path = self.entries[index].path.clone();
             if self.slots.contains_key(&path) || self.pending.contains(&path) { continue; }
@@ -236,6 +252,9 @@ fn button(c: &Card, x: f32, w: f32, label: &str, id: &str, danger: bool, enabled
 }
 
 impl App {
+    /// 图库当前列出的目录（删除时据此核对文件归属）。
+    pub fn screenshot_root(&self) -> Option<PathBuf> { self.shots.root.clone() }
+
     /// 截图后的自动预览是否正在显示（外壳据此临时取消全屏隐藏）。
     pub fn screenshot_preview_active(&self) -> bool { self.shots.preview.is_some() }
 
@@ -249,10 +268,12 @@ impl App {
         let ctx = c.ui.ctx().clone();
         let root = store::resolve_root(&self.settings.screenshot_dir);
         // 隔一段时间再进入本页，或保存位置改了：重新扫描，反映资源管理器里的增删。
-        if root != self.shots.root || !self.shots.scanned && !self.shots.scanning || self.t - self.shots.drawn_at > 0.5 {
+        let pass = ctx.cumulative_pass_nr();
+        let reentered = pass > self.shots.drawn_pass + 2;
+        self.shots.drawn_pass = pass;
+        if root != self.shots.root || !self.shots.scanned && !self.shots.scanning || reentered {
             self.shots.rescan(&ctx, root.clone());
         }
-        self.shots.drawn_at = self.t;
         // 标题行：截图（由 page_title 绘制）· 计数 · 时间 · 新截图
         if !self.shots.entries.is_empty() {
             let count = format!("{} / {}", self.shots.selected + 1, self.shots.entries.len());
@@ -409,18 +430,27 @@ impl App {
     }
 
     /// 外壳报告新截图已保存。
-    pub fn screenshot_saved(&mut self, ctx: &egui::Context, path: &Path, images: Arc<Images>) {
-        if self.shots.root.is_none() { self.shots.rescan(ctx, store::resolve_root(&self.settings.screenshot_dir)); }
+    pub fn screenshot_saved(&mut self, ctx: &egui::Context, path: &Path, images: Arc<Images>, seq: Option<u64>) {
+        // 图库列的是别的目录（例如保存失败后另选了目录）：改列这张截图所在的目录，预览才显示它。
+        let saved_root = path.parent().and_then(Path::parent).map(Path::to_path_buf);
+        if saved_root.is_some() && saved_root != self.shots.root { self.shots.rescan(ctx, saved_root); }
         self.shots.add_saved(ctx, path, &images);
-        self.start_screenshot_preview();
+        self.start_screenshot_preview(seq);
     }
 
-    /// 自动复制或「复制」按钮的结果。预览开着时显示在预览标题里，否则用提示。
-    pub fn screenshot_copied(&mut self, result: Result<(), String>) {
-        match self.shots.preview.as_mut() {
+    /// 复制结果。自动复制（带截图序号）显示在对应的预览里，可能先于“已保存”到达；手动复制用提示。
+    pub fn screenshot_copied(&mut self, result: Result<(), String>, seq: Option<u64>) {
+        let Some(seq) = seq else { return self.say(match result { Ok(()) => "已复制图片".to_string(), Err(error) => error }) };
+        match self.shots.preview.as_mut().filter(|preview| preview.seq == Some(seq)) {
             Some(preview) => preview.copy = Some(result),
-            None => self.say(match result { Ok(()) => "已复制图片".to_string(), Err(error) => error }),
+            None => self.shots.early_copy = Some((seq, result)),
         }
+    }
+
+    /// 预览开始时取出先到的复制结果（只认同一次截图）。
+    pub(crate) fn take_early_copy(&mut self, seq: Option<u64>) -> Option<Result<(), String>> {
+        let (early, result) = self.shots.early_copy.take()?;
+        (Some(early) == seq).then_some(result)
     }
 
     /// 删除结果：成功从列表移除，相邻的一张被选中。
@@ -435,12 +465,12 @@ impl App {
     /// 外壳报告保存失败：图片仍在内存里，展开岛提供重试、另选目录、复制和放弃。
     pub fn screenshot_save_failed(&mut self, ctx: &egui::Context, error: String, images: Arc<Images>, pending: usize) {
         self.shots.failure = Some(Failure { error, pending, slot: upload(ctx, Path::new("未保存的截图"), &images) });
-        self.start_screenshot_preview();
+        self.start_screenshot_preview(None);
     }
 
     /// 有未处理的保存失败时再次截图：重新展开失败状态，不开始新的框选。
     pub fn show_screenshot_failure(&mut self) {
-        if self.shots.failure.is_some() { self.start_screenshot_preview(); }
+        if self.shots.failure.is_some() { self.start_screenshot_preview(None); }
     }
 
     /// 失败的截图已重新保存（预览继续显示保存好的图）或被放弃（`close`：收起预览）。
@@ -480,7 +510,7 @@ impl App {
             if close.clicked() { self.end_screenshot_preview(true); }
             return true;
         }
-        let (until, copy) = (preview.until, preview.copy.clone());
+        let (until, copy, seq) = (preview.until, preview.copy.clone(), preview.seq);
         c.text(18.0, 25.0, "截图已保存", size::TITLE, W::Bold, theme::WHITE, H::Left);
         if let Some(until) = until {
             c.text(368.0, 24.0, &format!("{} 秒后收起", (until - self.t).ceil().max(0.0) as u32), size::TINY, W::Regular, theme::DIM, H::Right);
@@ -492,15 +522,17 @@ impl App {
         } else {
             self.gallery_body(c, &self.today.clone(), cmds);
         }
-        let (status, ink) = match &copy {
-            None => ("正在复制…", theme::GRAY),
-            Some(Ok(())) => ("已复制到剪贴板", theme::GREEN),
-            Some(Err(_)) => ("未能复制，点「复制」重试", theme::RED_TOP),
-        };
-        let sw = c.text_w(status, size::TINY, W::Semibold) + 14.0;
-        let (sx, sy) = (MAIN.0 + MAIN.2 - 8.0 - sw, MAIN.1 + MAIN.3 - 26.0);
-        c.fill(sx, sy, sw, 18.0, 9.0, Color32::from_black_alpha(185));
-        c.text(sx + sw / 2.0, sy + 13.0, status, size::TINY, W::Semibold, ink, H::Center);
+        if seq.is_some() {
+            let (status, ink) = match &copy {
+                None => ("正在复制…", theme::GRAY),
+                Some(Ok(())) => ("已复制到剪贴板", theme::GREEN),
+                Some(Err(_)) => ("未能复制，点「复制」重试", theme::RED_TOP),
+            };
+            let sw = c.text_w(status, size::TINY, W::Semibold) + 14.0;
+            let (sx, sy) = (MAIN.0 + MAIN.2 - 8.0 - sw, MAIN.1 + MAIN.3 - 26.0);
+            c.fill(sx, sy, sw, 18.0, 9.0, Color32::from_black_alpha(185));
+            c.text(sx + sw / 2.0, sy + 13.0, status, size::TINY, W::Semibold, ink, H::Center);
+        }
         if close.clicked() { self.end_screenshot_preview(true); }
         true
     }
