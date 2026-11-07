@@ -39,6 +39,7 @@ mod avoidance;
 mod focus_bar;
 mod salary;
 mod salary_ui;
+mod screenshot_ui;
 #[cfg(windows)]
 pub mod system;
 pub mod paint;

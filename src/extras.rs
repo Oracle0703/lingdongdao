@@ -819,8 +819,8 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
         }).response
     });
 }
-const SETTINGS_GROUPS: [(&str,usize,usize);9] = [
-    ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3), ("工资",13,13),
+const SETTINGS_GROUPS: [(&str,usize,usize);10] = [
+    ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3), ("工资",13,13), ("截图",14,14),
     ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度与模型",11,12), ("关于",9,9),
 ];
 
@@ -872,6 +872,7 @@ impl App {
                         4=>egui::include_image!("../assets/settings-icons/system/tasks.svg"),
                         6=>egui::include_image!("../assets/settings-icons/system/notifications.svg"),
                         13=>egui::include_image!("../assets/settings-icons/system/salary.svg"),
+                        14=>egui::include_image!("../assets/settings-icons/system/screenshot.svg"),
                         _=>egui::include_image!("../assets/settings-icons/system/about.svg"),
                     };
                     let icon_bg=egui::Rect::from_center_size(egui::pos2(rect.left()+19.0,rect.center().y),egui::vec2(22.0,22.0));
@@ -881,7 +882,7 @@ impl App {
                 }
             });
             egui::CentralPanel::default().frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(23,27,35),Color32::from_rgb(248,250,253))).inner_margin(egui::Margin::symmetric(18,16))).show(ctx,|ui|{
-                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","大模型","工资"];
+                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","大模型","工资","截图"];
                 ui.label(egui::RichText::new(titles[self.settings_tab.min(titles.len()-1)]).size(21.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,42,62))));
                 if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
                     if start!=end {
@@ -911,6 +912,7 @@ impl App {
                     match self.settings_tab {
                     11=>self.quota_settings(ui),
                     crate::salary_ui::SETTINGS_TAB=>self.salary_settings(ui),
+                    crate::screenshot_ui::SETTINGS_TAB=>self.screenshot_settings(ui),
                     12=>self.llm_settings(ui),
                     10=>{
                         ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));

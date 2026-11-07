@@ -51,8 +51,9 @@ struct Shell {
     screenshot: Option<daozai::screenshot::Capture>,
     #[cfg(windows)]
     screenshot_notices: Vec<(String, String)>,
+    /// 已交给托盘线程注册的截图快捷键（截图页关闭时为 Off）。
     #[cfg(windows)]
-    screenshot_hotkey_seen: bool,
+    screenshot_hotkey_applied: daozai::tray::ScreenshotHotkey,
     #[cfg(windows)]
     autostart: bool,
     /// v0.5.4：蓝牙音频设备（后台线程推送）与音量回声的静默窗口。
@@ -99,11 +100,15 @@ impl Shell {
         #[cfg(windows)]
         let autostart = daozai::tray::autostart_enabled();
         #[cfg(windows)]
+        #[cfg(windows)]
+        let screenshot_hotkey = screenshot_hotkey(&app);
+        #[cfg(windows)]
         let tray = daozai::tray::Tray::start(daozai::tray::State {
             pet: app.settings.pet,
             minimal: app.settings.minimal,
             autostart,
-        });
+            screenshot: app.settings.visible_pages[app::SCREENSHOT_PAGE],
+        }, screenshot_hotkey);
         diagnostics::startup("初始化通知监听");
         #[cfg(windows)]
         let incoming=if app.settings.read_notifications {match daozai::system::connect(){Ok(rx)=>Some(rx),Err(e)=>{app.listener_status=format!("Windows 无法读取通知：{}",e.code());None}}}else{None};
@@ -157,7 +162,7 @@ impl Shell {
             #[cfg(windows)]
             screenshot_notices: Vec::new(),
             #[cfg(windows)]
-            screenshot_hotkey_seen: false,
+            screenshot_hotkey_applied: screenshot_hotkey,
             #[cfg(windows)]
             autostart,
             #[cfg(windows)]
@@ -180,11 +185,9 @@ impl Shell {
         for e in events {
             match e {
                 Event::StartScreenshot => self.begin_screenshot(ctx),
+                // 注册结果只显示在设置 → 截图里，不在每次启动时弹通知。
                 Event::ScreenshotHotkeyChanged(status) => {
-                    if self.screenshot_hotkey_seen || status.error_code.is_some() {
-                        self.screenshot_notices.push(("截图快捷键".into(), status.message()));
-                    }
-                    self.screenshot_hotkey_seen = true;
+                    self.app.set_screenshot_hotkey_status(if status.registered {status.hotkey.label()} else {""}, status.message());
                 }
                 Event::OpenSettings=>self.app.open_settings(),
                 Event::OpenCalendar=>self.app.open_calendar(None),
@@ -209,13 +212,18 @@ impl Shell {
             }
         }
         if let Some(t) = &self.tray {
-            t.sync(tray::State { pet: self.app.settings.pet, minimal: self.app.settings.minimal, autostart: self.autostart });
+            t.sync(tray::State { pet: self.app.settings.pet, minimal: self.app.settings.minimal, autostart: self.autostart, screenshot: self.app.settings.visible_pages[app::SCREENSHOT_PAGE] });
+            let hotkey = screenshot_hotkey(&self.app);
+            if hotkey != self.screenshot_hotkey_applied {
+                t.set_screenshot_hotkey(hotkey);
+                self.screenshot_hotkey_applied = hotkey;
+            }
         }
     }
 
     #[cfg(windows)]
     fn begin_screenshot(&mut self, ctx: &egui::Context) {
-        if self.app.is_screenshot_capturing() { return; }
+        if self.app.is_screenshot_capturing() || !self.app.settings.visible_pages[app::SCREENSHOT_PAGE] { return; }
         let Some(hwnd) = self.native.as_ref().map(|window| window.hwnd()) else {
             self.screenshot_notices.push(("无法开始截图".into(), "岛窗口尚未就绪，请稍后重试".into()));
             return;
@@ -553,6 +561,12 @@ impl eframe::App for Shell {
                 Cmd::CalendarTest(cfg,password)=>self.cal.test(cfg,password),
                 Cmd::CalendarSync=>self.cal.sync_now(),
                 Cmd::CalendarMonth(month)=>self.cal.view_month(month),
+                Cmd::BeginScreenshot=>{
+                    #[cfg(windows)] self.begin_screenshot(ctx);
+                },
+                Cmd::ScreenshotChooseFolder=>{
+                    #[cfg(windows)] match daozai::system::pick_folder("选择截图保存位置"){Ok(Some(dir))=>self.app.set_screenshot_dir(dir),Ok(None)=>{},Err(e)=>self.app.say(format!("无法选择文件夹：{}",e.code()))}
+                },
                 Cmd::CalendarForget=>{
                     if let Err(error)=daozai::calendar::forget_config(){self.app.say(&error);continue;}
                     if let Some(old)=self.app.forget_calendar(){daozai::calendar::secrets::delete(&old);}
@@ -577,6 +591,12 @@ impl eframe::App for Shell {
 }
 
 // ---------------- 系统信息 ----------------
+
+/// 设置里的截图快捷键；截图页关闭时不注册。
+#[cfg(windows)]
+fn screenshot_hotkey(app: &App) -> daozai::tray::ScreenshotHotkey {
+    if app.settings.visible_pages[app::SCREENSHOT_PAGE] { daozai::tray::ScreenshotHotkey::from_key(&app.settings.screenshot_hotkey) } else { daozai::tray::ScreenshotHotkey::Off }
+}
 
 fn schedule_repaint(ctx:&egui::Context,interval:Duration){
     // egui 会预减一帧；本程序自行调度刷新，补回后才能保持实际的等待间隔。

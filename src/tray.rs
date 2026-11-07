@@ -26,7 +26,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Threading::{CreateMutexW, ExitProcess};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_NOREPEAT,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIF_INFO, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
@@ -49,11 +49,9 @@ const CMD_ABOUT: u32 = 4;
 const CMD_MINIMAL: u32 = 5;
 const CMD_SETTINGS:u32=6;
 const CMD_SCREENSHOT: u32 = 7;
-const CMD_HOTKEY_ALT_A: u32 = 8;
-const CMD_HOTKEY_ALT_S: u32 = 9;
-const CMD_HOTKEY_OFF: u32 = 10;
 const SCREENSHOT_HOTKEY_ID: i32 = 1;
 const TIMER_MENU: usize = 12;
+const WM_SET_HOTKEY: u32 = WM_APP + 6;
 
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 // w!() 只接受字面量，需与 brand::APP_ID 保持一致（见 tray_identifiers_follow_app_id 测试）。
@@ -66,25 +64,49 @@ pub struct State {
     pub pet: bool,
     pub minimal: bool,
     pub autostart: bool,
+    /// 截图页开启时才显示「区域截图」菜单项。
+    pub screenshot: bool,
 }
 
-/// 阶段 A 的临时验收入口；正式设置在后续阶段接入。
+/// 截图快捷键预设，与设置里的 `screenshot_hotkey` 键名一一对应（见 `model::SCREENSHOT_HOTKEYS`）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ScreenshotHotkey {
     #[default]
     AltA,
     AltS,
+    CtrlAltA,
+    F1,
     Off,
 }
 
 impl ScreenshotHotkey {
+    const ALL: [Self; 5] = [Self::AltA, Self::AltS, Self::CtrlAltA, Self::F1, Self::Off];
+
     pub fn label(self) -> &'static str {
-        match self { Self::AltA => "Alt + A", Self::AltS => "Alt + S", Self::Off => "关闭" }
+        match self { Self::AltA => "Alt + A", Self::AltS => "Alt + S", Self::CtrlAltA => "Ctrl + Alt + A", Self::F1 => "F1", Self::Off => "关闭" }
     }
 
+    pub fn key(self) -> &'static str {
+        match self { Self::AltA => "alt_a", Self::AltS => "alt_s", Self::CtrlAltA => "ctrl_alt_a", Self::F1 => "f1", Self::Off => "off" }
+    }
+
+    /// 设置中的键名；未知值按默认 `Alt + A` 处理。
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL.into_iter().find(|hotkey| hotkey.key() == key).unwrap_or_default()
+    }
+
+    fn code(self) -> usize { Self::ALL.iter().position(|hotkey| *hotkey == self).unwrap_or(0) }
+
+    fn from_code(code: usize) -> Option<Self> { Self::ALL.get(code).copied() }
+
     fn registration(self) -> Option<(HOT_KEY_MODIFIERS, u32)> {
-        let key = match self { Self::AltA => b'A', Self::AltS => b'S', Self::Off => return None };
-        Some((MOD_ALT | MOD_NOREPEAT, key as u32))
+        match self {
+            Self::AltA => Some((MOD_ALT | MOD_NOREPEAT, b'A' as u32)),
+            Self::AltS => Some((MOD_ALT | MOD_NOREPEAT, b'S' as u32)),
+            Self::CtrlAltA => Some((MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, b'A' as u32)),
+            Self::F1 => Some((MOD_NOREPEAT, 0x70)),
+            Self::Off => None,
+        }
     }
 }
 
@@ -104,13 +126,13 @@ impl Default for HotkeyStatus {
 impl HotkeyStatus {
     pub fn message(self) -> String {
         let label = self.hotkey.label();
-        if self.hotkey == ScreenshotHotkey::Off { return "截图快捷键已关闭；仍可使用托盘「区域截图」。".into(); }
-        if self.registered { return format!("截图快捷键 {label} 已启用。全局生效，会覆盖其他程序内部的同名快捷键。"); }
+        if self.hotkey == ScreenshotHotkey::Off { return "快捷键已关闭；仍可使用托盘「区域截图」或截图页的「新截图」。".into(); }
+        if self.registered { return format!("{label} 已启用。"); }
         if self.error_code == Some(1409) {
             let hint = if self.hotkey == ScreenshotHotkey::AltA { "（常见是微信截图）" } else { "" };
-            format!("{label} 已被其他程序占用{hint}。请在托盘「截图快捷键（阶段 A）」中改选，或使用「区域截图」。")
+            format!("{label} 已被其他程序占用{hint}，请换一个快捷键，或关掉占用它的程序后重新选择。")
         } else {
-            format!("{label} 注册失败（Windows 错误 {}）。可使用托盘「区域截图」，或在「截图快捷键（阶段 A）」中重试。", self.error_code.unwrap_or(0))
+            format!("{label} 注册失败（Windows 错误 {}），可以换一个快捷键再试。", self.error_code.unwrap_or(0))
         }
     }
 }
@@ -282,43 +304,14 @@ fn popup_menu(state: State, hotkey: HotkeyStatus) -> windows::core::Result<HMENU
         append(check(state.pet), CMD_MASCOT, PCWSTR(wide[1].as_ptr()));
         append(check(state.minimal), CMD_MINIMAL, PCWSTR(wide[2].as_ptr()));
         append(MF_SEPARATOR, 0, PCWSTR::null());
-        append(MF_STRING, CMD_SCREENSHOT, w!("区域截图"));
-        let hotkeys = match screenshot_hotkey_menu(hotkey) {
-            Ok(menu) => menu,
-            Err(error) => { let _ = DestroyMenu(menu); return Err(error); }
-        };
-        if let Err(error) = AppendMenuW(menu, MF_POPUP, hotkeys.0 as usize, w!("截图快捷键（阶段 A）")) {
-            let _ = DestroyMenu(hotkeys);
-            let _ = DestroyMenu(menu);
-            return Err(error);
+        if state.screenshot {
+            // 制表符后的文字由菜单右对齐，显示已生效的快捷键。
+            let label = if hotkey.registered { self::wide(&format!("区域截图\t{}", hotkey.hotkey.label().replace(' ', ""))) } else { self::wide("区域截图") };
+            append(MF_STRING, CMD_SCREENSHOT, PCWSTR(label.as_ptr()));
         }
         append(MF_STRING, CMD_SETTINGS, PCWSTR(wide[5].as_ptr()));
         append(MF_STRING, CMD_ABOUT, PCWSTR(wide[3].as_ptr()));
         append(MF_STRING, CMD_EXIT, PCWSTR(wide[4].as_ptr()));
-        Ok(menu)
-    }
-}
-
-fn screenshot_hotkey_menu(status: HotkeyStatus) -> windows::core::Result<HMENU> {
-    unsafe {
-        let menu = CreatePopupMenu()?;
-        let result = (|| {
-            for (id, hotkey) in [(CMD_HOTKEY_ALT_A, ScreenshotHotkey::AltA), (CMD_HOTKEY_ALT_S, ScreenshotHotkey::AltS), (CMD_HOTKEY_OFF, ScreenshotHotkey::Off)] {
-                let label = wide(hotkey.label());
-                let flags = MF_STRING | if status.hotkey == hotkey { MF_CHECKED } else { MF_UNCHECKED };
-                AppendMenuW(menu, flags, id as usize, PCWSTR(label.as_ptr()))?;
-            }
-            AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())?;
-            let detail = if status.registered { "已注册".to_string() } else if status.hotkey == ScreenshotHotkey::Off { "已关闭".to_string() }
-                else if status.error_code == Some(1409) { "注册失败：已被其他程序占用".to_string() }
-                else { format!("注册失败：Windows 错误 {}", status.error_code.unwrap_or(0)) };
-            let detail = wide(&detail);
-            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(detail.as_ptr()))?;
-            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("全局生效，会覆盖应用内同名快捷键"))?;
-            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("临时选择，重启后恢复 Alt + A"))?;
-            Ok(())
-        })();
-        if let Err(error) = result { let _ = DestroyMenu(menu); return Err(error); }
         Ok(menu)
     }
 }
@@ -422,9 +415,6 @@ fn show_menu_at(hwnd: HWND, ctx: &Ctx, x: i32, y: i32) {
                 }
                 let _ = ctx.tx.send(Event::StartScreenshot);
             }
-            CMD_HOTKEY_ALT_A => ctx.change_hotkey(hwnd, ScreenshotHotkey::AltA),
-            CMD_HOTKEY_ALT_S => ctx.change_hotkey(hwnd, ScreenshotHotkey::AltS),
-            CMD_HOTKEY_OFF => ctx.change_hotkey(hwnd, ScreenshotHotkey::Off),
             CMD_ABOUT => about(),
             CMD_EXIT => {
                 // 原版：先摘图标，再结束进程
@@ -461,12 +451,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
     if msg == WM_APP+4 {return LRESULT(ctx.tx.send(Event::OpenSettings).is_ok() as isize);}
     if msg == WM_APP+5 {return LRESULT(ctx.tx.send(Event::OpenCalendar).is_ok() as isize);}
+    // 主线程改了设置：RegisterHotKey 必须由创建窗口的线程调用，所以经消息转到托盘线程。
+    if msg == WM_SET_HOTKEY {
+        if let Some(hotkey) = ScreenshotHotkey::from_code(wp.0) { ctx.change_hotkey(hwnd, hotkey); }
+        return LRESULT(0);
+    }
     if msg == WM_HOTKEY && wp.0 == SCREENSHOT_HOTKEY_ID as usize {
         let status = ctx.hotkey_status();
         // 旧组合键的排队消息在切换后失效；MOD_NOREPEAT 不在 WM_HOTKEY 的低字中。
         let modifiers = lp.0 as u32 & 0xffff;
         let key = (lp.0 as u32 >> 16) & 0xffff;
-        if status.registered && status.hotkey.registration().is_some_and(|(_, vk)| key == vk && modifiers == MOD_ALT.0) {
+        if status.registered && status.hotkey.registration().is_some_and(|(mods, vk)| key == vk && modifiers == (mods.0 & !MOD_NOREPEAT.0)) {
             let _ = ctx.tx.send(Event::StartScreenshot);
         }
         return LRESULT(0);
@@ -514,11 +509,8 @@ pub struct Tray {
 }
 
 impl Tray {
-    pub fn start(state: State) -> Option<Self> {
-        Self::start_with_hotkey(state, ScreenshotHotkey::default())
-    }
-
-    fn start_with_hotkey(state: State, initial_hotkey: ScreenshotHotkey) -> Option<Self> {
+    /// `initial_hotkey`：按设置注册的截图快捷键；截图页关闭时传 `Off`。
+    pub fn start(state: State, initial_hotkey: ScreenshotHotkey) -> Option<Self> {
         let shared = Arc::new(Mutex::new(state));
         let hotkey = Arc::new(Mutex::new(HotkeyStatus::default()));
         let (event_tx, event_rx) = channel();
@@ -619,6 +611,11 @@ impl Tray {
     #[allow(dead_code)]
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    /// 设置改变时调用；实际注册在托盘线程完成，结果经 `Event::ScreenshotHotkeyChanged` 返回。
+    pub fn set_screenshot_hotkey(&self, hotkey: ScreenshotHotkey) {
+        unsafe { let _ = PostMessageW(self.hwnd, WM_SET_HOTKEY, WPARAM(hotkey.code()), LPARAM(0)); }
     }
 
     pub fn hotkey_status(&self) -> HotkeyStatus {
@@ -756,7 +753,7 @@ mod tests {
     #[test]
     fn repeated_launch_requests_settings_or_calendar() {
         // 普通回归不得临时抢占用户的全局快捷键。
-        let tray=Tray::start_with_hotkey(State::default(), ScreenshotHotkey::Off).expect("托盘应能启动");
+        let tray=Tray::start(State::default(), ScreenshotHotkey::Off).expect("托盘应能启动");
         for (calendar,expected) in [(false,Event::OpenSettings),(true,Event::OpenCalendar)] {
             assert!(request_existing_window(tray.hwnd(),calendar));
             assert_eq!(tray.events.recv_timeout(Duration::from_secs(2)).unwrap(),expected);
@@ -766,17 +763,20 @@ mod tests {
 
     #[test]
     fn menu_order_checks_and_separator() {
-        for (state, want) in [
-            (State { pet: false, minimal: false, autostart: false }, [false, false, false]),
-            (State { pet: true, minimal: false, autostart: true }, [true, true, false]),
-            (State { pet: false, minimal: true, autostart: false }, [false, false, true]),
+        let registered = HotkeyStatus { hotkey: ScreenshotHotkey::AltA, registered: true, error_code: None };
+        for (state, want, hotkey, screenshot_item) in [
+            (State { pet: false, minimal: false, autostart: false, screenshot: true }, [false, false, false], HotkeyStatus::default(), Some("区域截图")),
+            (State { pet: true, minimal: false, autostart: true, screenshot: true }, [true, true, false], registered, Some("区域截图\tAlt+A")),
+            (State { pet: false, minimal: true, autostart: false, screenshot: false }, [false, false, true], registered, None),
         ] {
-            let menu = popup_menu(state, HotkeyStatus::default()).expect("创建菜单");
+            let menu = popup_menu(state, hotkey).expect("创建菜单");
             let items = menu_items(menu);
-            assert_eq!(items.len(), 9, "原菜单 + 截图入口和快捷键子菜单");
             assert!(items[3].2, "第 4 项是分隔线");
             let texts: Vec<_> = items.iter().filter(|i| !i.2).map(|i| i.0.as_str()).collect();
-            assert_eq!(texts, ["开机启动", "吉祥物", "极简刘海", "区域截图", "截图快捷键（阶段 A）", "设置…", "关于岛仔", "退出"]);
+            let mut expected = vec!["开机启动", "吉祥物", "极简刘海"];
+            expected.extend(screenshot_item);
+            expected.extend(["设置…", "关于岛仔", "退出"]);
+            assert_eq!(texts, expected, "截图页关闭时不显示「区域截图」");
             assert_eq!([items[0].1, items[1].1, items[2].1], want, "勾选态应与状态一致");
             unsafe {
                 let _ = DestroyMenu(menu);
@@ -790,23 +790,6 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_hotkey_menu_distinguishes_conflict_from_success() {
-        for status in [
-            HotkeyStatus { hotkey: ScreenshotHotkey::AltA, registered: false, error_code: Some(1409) },
-            HotkeyStatus { hotkey: ScreenshotHotkey::AltS, registered: true, error_code: None },
-            HotkeyStatus::default(),
-        ] {
-            let menu = screenshot_hotkey_menu(status).unwrap();
-            let items = menu_items(menu);
-            assert_eq!([items[0].1, items[1].1, items[2].1], [status.hotkey == ScreenshotHotkey::AltA, status.hotkey == ScreenshotHotkey::AltS, status.hotkey == ScreenshotHotkey::Off]);
-            assert_eq!(items[4].0.contains("占用"), status.error_code == Some(1409));
-            assert_eq!(items[4].0 == "已注册", status.registered);
-            assert!(items[5].0.contains("覆盖应用内"));
-            unsafe { DestroyMenu(menu).unwrap(); }
-        }
-    }
-
-    #[test]
     fn hotkey_error_message_does_not_claim_every_error_is_a_conflict() {
         let conflict = HotkeyStatus { hotkey: ScreenshotHotkey::AltA, registered: false, error_code: Some(1409) };
         assert!(conflict.message().contains("微信"));
@@ -816,7 +799,17 @@ mod tests {
         assert!(!failure.message().contains("已被其他程序占用"));
         assert_eq!(ScreenshotHotkey::default(), ScreenshotHotkey::AltA);
         assert_eq!(ScreenshotHotkey::AltS.registration(), Some((MOD_ALT | MOD_NOREPEAT, b'S' as u32)));
+        assert_eq!(ScreenshotHotkey::CtrlAltA.registration(), Some((MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, b'A' as u32)));
+        assert_eq!(ScreenshotHotkey::F1.registration(), Some((MOD_NOREPEAT, 0x70)));
         assert!(ScreenshotHotkey::Off.registration().is_none());
+        for hotkey in ScreenshotHotkey::ALL {
+            assert_eq!(ScreenshotHotkey::from_key(hotkey.key()), hotkey);
+            assert_eq!(ScreenshotHotkey::from_code(hotkey.code()), Some(hotkey));
+        }
+        assert_eq!(ScreenshotHotkey::from_key("未知"), ScreenshotHotkey::AltA, "未知键名按默认处理");
+        let keys: Vec<_> = ScreenshotHotkey::ALL.iter().map(|hotkey| hotkey.key()).collect();
+        let offered: Vec<_> = crate::model::SCREENSHOT_HOTKEYS.iter().map(|(key, _)| *key).collect();
+        assert_eq!(keys, offered, "设置页的选项与托盘注册的预设一致");
     }
 
     #[test]

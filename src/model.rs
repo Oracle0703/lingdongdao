@@ -151,14 +151,19 @@ pub struct Settings {
     pub ui_scale: u16,
     /// 截图保存目录（绝对路径）。空值：`E:\` 存在时用 `E:\截图`，否则截图时提示选择。
     pub screenshot_dir: String,
+    /// 截图快捷键预设的键名，取值见 `SCREENSHOT_HOTKEYS`。
+    pub screenshot_hotkey: String,
 }
+
+/// 截图快捷键预设：（设置中的键名，显示文字）。托盘按键名注册，见 `tray::ScreenshotHotkey`。
+pub const SCREENSHOT_HOTKEYS: [(&str, &str); 5] = [("alt_a", "Alt + A"), ("alt_s", "Alt + S"), ("ctrl_alt_a", "Ctrl + Alt + A"), ("f1", "F1"), ("off", "关闭")];
 
 /// 设置页可选的岛的大小；实际倍数还会受所在屏幕宽高限制，见 `display_layout::island_zoom`。
 pub const UI_SCALES: [u16; 6] = [100, 110, 120, 130, 140, 150];
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false], page_order: std::array::from_fn(|page| page), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, ui_scale: 100, screenshot_dir: String::new() }
+        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false,true], page_order: std::array::from_fn(|page| page), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, ui_scale: 100, screenshot_dir: String::new(), screenshot_hotkey: "alt_a".into() }
     }
 }
 
@@ -237,6 +242,7 @@ impl Settings {
                 "calendar_auto_sync" => s.calendar_auto_sync = v != "0",
                 "ui_scale" => s.ui_scale = v.parse::<u16>().ok().filter(|v|UI_SCALES.contains(v)).unwrap_or(100),
                 "screenshot_dir" => s.screenshot_dir = v.trim().to_string(),
+                "screenshot_hotkey" if SCREENSHOT_HOTKEYS.iter().any(|(key,_)|*key==v) => s.screenshot_hotkey = v,
                 _ => {}
             }
         }
@@ -289,6 +295,7 @@ impl Settings {
                 ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
                 ("ui_scale".into(), self.ui_scale.to_string()),
                 ("screenshot_dir".into(), self.screenshot_dir.clone()),
+                ("screenshot_hotkey".into(), self.screenshot_hotkey.clone()),
             ],
         )
     }

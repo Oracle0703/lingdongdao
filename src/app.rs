@@ -40,12 +40,13 @@ pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整
 pub const WIN_H: f32 = 270.0;
 pub(crate) const SALARY_PAGE: usize = 8;
 /// 功能页数量。新增页面时改这里，并补齐下面三个数组和 `Settings` 的默认值（数组长度不符会编译失败）。
-pub(crate) const PAGE_COUNT: usize = 9;
-pub(crate) const PAGE_NAMES: [&str; PAGE_COUNT] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "工资"];
+pub(crate) const PAGE_COUNT: usize = 10;
+pub const SCREENSHOT_PAGE: usize = 9;
+pub(crate) const PAGE_NAMES: [&str; PAGE_COUNT] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "工资", "截图"];
 /// 各页面齿轮对应的设置分组。
-pub(crate) const PAGE_SETTINGS_TABS: [usize; PAGE_COUNT] = [1, 2, 3, 5, 4, 7, 11, 8, crate::salary_ui::SETTINGS_TAB];
+pub(crate) const PAGE_SETTINGS_TABS: [usize; PAGE_COUNT] = [1, 2, 3, 5, 4, 7, 11, 8, crate::salary_ui::SETTINGS_TAB, crate::screenshot_ui::SETTINGS_TAB];
 /// 设置 → 功能页面里每页的说明。
-pub(crate) const PAGE_DESCRIPTIONS: [&str; PAGE_COUNT] = ["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","按月薪实时计算今日收入"];
+pub(crate) const PAGE_DESCRIPTIONS: [&str; PAGE_COUNT] = ["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","按月薪实时计算今日收入","区域截图、历史浏览与复制拖出"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -156,6 +157,10 @@ pub enum Cmd {
     CalendarMonth(chrono::NaiveDate),
     /// 断开并删除日历配置（凭据由界面删除）。
     CalendarForget,
+    /// 开始一次区域截图（截图页的按钮）。
+    BeginScreenshot,
+    /// 打开文件夹选择框，设置截图保存位置。
+    ScreenshotChooseFolder,
 }
 
 pub struct FrameOut {
@@ -397,6 +402,9 @@ pub struct App {
     pub displays:Vec<crate::display_layout::Display>,
     /// 当前屏幕允许的最大岛的大小（百分比），由外壳按岛所在屏幕更新，供设置页提示。
     pub ui_scale_max:u16,
+    /// 截图快捷键：当前生效的显示文字（未生效为空）与设置页里的状态说明，由外壳根据托盘注册结果更新。
+    pub(crate) screenshot_hotkey_label: String,
+    pub(crate) screenshot_hotkey_status: String,
     browser_at_top:bool,
     browser_minimal_active:bool,
     pub(crate) settings_focus_requested:bool,
@@ -530,7 +538,7 @@ impl App {
             music_sources: Vec::new(),
             music_sources_open: false,
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, displays:Vec::new(), ui_scale_max:150, browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, displays:Vec::new(), ui_scale_max:150, screenshot_hotkey_label:String::new(), screenshot_hotkey_status:String::new(), browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, pet: Default::default(), last_drink: None,
@@ -1880,6 +1888,7 @@ impl App {
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
             SALARY_PAGE => ("今日", "工资", theme::YELLOW),
+            SCREENSHOT_PAGE => ("截图", "", theme::WHITE),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -1938,6 +1947,7 @@ impl App {
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
             SALARY_PAGE => self.page_salary(c),
+            SCREENSHOT_PAGE => self.page_screenshot(c, env, cmds),
             _ => self.page_settings(c),
         }
     }
