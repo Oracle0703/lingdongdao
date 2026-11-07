@@ -52,7 +52,6 @@ mod updates;
 pub mod native;
 #[cfg(windows)]
 pub mod tray;
-#[cfg(windows)]
 pub mod screenshot;
 
 #[cfg(test)]

@@ -743,7 +743,7 @@ pub(crate) fn select(island: HWND, cancel: &AtomicBool) -> Result<Option<Selecte
             Some(Outcome::Failed(error)) => { drop(session); return Err(error.into()); }
             Some(Outcome::Selected {monitor, rect, confirmed_at}) => {
                 let rgba = session.frames[monitor].image.crop(rect)?;
-                Some(SelectedImage {width:rect.width() as u32, height:rect.height() as u32, rgba, confirmed_at})
+                Some(SelectedImage {width:rect.width() as u32, height:rect.height() as u32, rgba, confirmed_at, root:None})
             }
             _ => None,
         };

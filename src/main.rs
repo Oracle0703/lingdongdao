@@ -226,7 +226,8 @@ impl Shell {
             if self.screenshot.is_none() {
                 self.screenshot = Some(daozai::screenshot::Capture::new(ctx.clone())?);
             }
-            self.screenshot.as_mut().unwrap().begin(hwnd)
+            let root=daozai::screenshot::store::resolve_root(&self.app.settings.screenshot_dir);
+            self.screenshot.as_mut().unwrap().begin(hwnd,root)
         })();
         if let Err(error) = result {
             self.end_screenshot();
@@ -275,7 +276,7 @@ impl Shell {
                     self.screenshot_notices.push(("截图失败".into(), error));
                 }
                 CaptureEvent::Saved { path, width, height, elapsed_ms } => {
-                    self.screenshot_notices.push(("截图已保存（阶段 A）".into(), format!(
+                    self.screenshot_notices.push(("截图已保存".into(), format!(
                         "{width} × {height} 像素 · {elapsed_ms:.1} ms\n{}", path.display()
                     )));
                 }
