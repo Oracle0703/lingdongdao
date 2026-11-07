@@ -13,7 +13,7 @@ pub(super) fn synthetic_frame(width: i32, height: i32) -> Frame {
 }
 
 fn visual(monitor: usize, start: (i32,i32), end: (i32,i32), adjustable: bool) -> VisualSelection {
-    VisualSelection {selection:Selection {monitor,rect:PixelRect {left:start.0.min(end.0),top:start.1.min(end.1),right:start.0.max(end.0),bottom:start.1.max(end.1)},adjustable},pressed:None}
+    VisualSelection {selection:Selection {monitor,rect:PixelRect {left:start.0.min(end.0),top:start.1.min(end.1),right:start.0.max(end.0),bottom:start.1.max(end.1)},adjustable},pressed:None,tool:None,undo:false}
 }
 
 fn pixels(image: &Bitmap) -> Vec<u8> {
@@ -53,10 +53,12 @@ fn dirty_region_covers_old_new_selection_border_labels_and_hint_transitions() {
         assert_eq!(changed_monitors(before,after),vec![1]);
     }
     assert!(changed_monitors(first,first).is_empty());
-    let stationary = overlay_layout(&frame,&style,Some(visual(0,(400,300),(450,350),true))).unwrap();
-    let moved = overlay_layout(&frame,&style,Some(visual(0,(400,300),(460,360),true))).unwrap();
-    let dirty = dirty_region(&stationary,&moved,style.metrics,frame.bounds).unwrap();
-    assert!(dirty.width()*dirty.height() < frame.image.width*frame.image.height/4);
+    // 在真实的 4K、200% 帧上，选区挪 10 像素只重画周围一小块（工具栏较宽，也远小于整屏）。
+    let large = synthetic_frame(3840,2160);
+    let stationary = overlay_layout(&large,&style,Some(visual(0,(1400,900),(1450,950),true))).unwrap();
+    let moved = overlay_layout(&large,&style,Some(visual(0,(1400,900),(1460,960),true))).unwrap();
+    let dirty = dirty_region(&stationary,&moved,style.metrics,large.bounds).unwrap();
+    assert!(dirty.width()*dirty.height() < large.image.width*large.image.height/8);
 }
 
 #[test]
@@ -138,7 +140,7 @@ fn drag_invalidates_only_its_offscreen_monitor_window() {
     let cancel = AtomicBool::new(false);
     let frames = vec![synthetic_frame(640,480),synthetic_frame(640,480)];
     let dark_frames = frames.iter().map(|frame|frame.image.darkened().unwrap()).collect();
-    let session = Session {frames,dark_frames,styles:RefCell::new(Vec::new()),windows:RefCell::new(Vec::new()),interaction:Cell::new(Interaction::default()),outcome:Cell::new(None),armed:Cell::new(false),cancel:&cancel,previous_foreground:HWND::default()};
+    let session = Session {frames,dark_frames,styles:RefCell::new(Vec::new()),windows:RefCell::new(Vec::new()),interaction:Cell::new(Interaction::default()),outcome:Cell::new(None),armed:Cell::new(false),cancel:&cancel,previous_foreground:HWND::default(),marks:RefCell::new(Vec::new()),annotated:RefCell::new(Vec::new()),stroke:RefCell::new(Vec::new()),edit:RefCell::new(None),anno_styles:RefCell::new(Vec::new())};
     unsafe {
         let module = GetModuleHandleW(None).unwrap();
         for index in 0..2 {
