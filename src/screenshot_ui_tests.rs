@@ -160,6 +160,31 @@ fn editing_a_draft_gets_a_toast_instead_of_the_preview() {
 }
 
 #[test]
+fn save_failure_keeps_the_image_and_offers_retry_folder_copy_and_discard() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.notifications = false;
+    h.app.page = 0;
+    h.frame(vec![]);
+    let rgba = shot(800, 450, 0);
+    let ctx = h.ctx.clone();
+    h.app.screenshot_save_failed(&ctx, "无法创建截图目录 E:/截图：系统找不到指定的路径。".into(), std::sync::Arc::new(crate::screenshot::library::images(800, 450, &rgba)), 1);
+    for _ in 0..30 { h.frame(vec![]); }
+    assert!(h.app.open && text_shown(&h, "截图未能保存") && text_shown(&h, "系统找不到指定的路径"));
+    for (label, cmd) in [("重试", Cmd::ScreenshotRetrySave), ("另选目录", Cmd::ScreenshotChooseFolder), ("复制图片", Cmd::ScreenshotCopyFailed), ("放弃", Cmd::ScreenshotDiscardFailed)] {
+        h.click_text(label);
+        assert!(h.cmds.contains(&cmd), "{label}");
+    }
+    // 失败状态比普通的 8 秒多留一会儿
+    for _ in 0..(12 * 60) { h.frame(vec![]); }
+    assert!(h.app.screenshot_preview_active());
+    h.app.clear_screenshot_failure(true);
+    assert!(!h.app.screenshot_preview_active(), "放弃后收起");
+    h.app.show_screenshot_failure();
+    assert!(!h.app.screenshot_preview_active(), "没有待处理的失败时不展开");
+}
+
+#[test]
 #[ignore = "按需生成截图页版式图：设置 DAOZAI_SCREENSHOT_PREVIEW 为输出目录"]
 fn screenshot_layout_gallery() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -181,7 +206,7 @@ fn screenshot_layout_gallery() {
         out
     }
     // (名称, 截图尺寸列表, 选中序号, 光标位置, 操作)
-    let cases: [(&str, Vec<(u32, u32)>, usize, Option<(f32, f32)>, &str); 7] = [
+    let cases: [(&str, Vec<(u32, u32)>, usize, Option<(f32, f32)>, &str); 8] = [
         ("page-landscape", vec![(1600, 900), (1920, 1080), (900, 1400), (2400, 600), (1280, 800)], 1, Some((209.5, 100.0)), ""),
         ("page-portrait", vec![(1600, 900), (900, 1400), (1280, 800)], 1, None, ""),
         ("page-wide-strip", vec![(3000, 400), (1600, 900)], 0, None, ""),
@@ -189,6 +214,7 @@ fn screenshot_layout_gallery() {
         ("page-empty", vec![], 0, None, ""),
         ("preview-saved", vec![(1600, 900), (1280, 800)], 0, None, "preview-ok"),
         ("preview-copying", vec![(1600, 900)], 0, None, "preview"),
+        ("preview-save-failed", vec![], 0, None, "failure"),
     ];
     for (name, shots, selected, cursor, action) in cases {
         let mut h = H::new();
@@ -196,7 +222,13 @@ fn screenshot_layout_gallery() {
         h.app.settings.notifications = false;
         let mut raster = crate::preview_raster::Raster::new(cw, ch);
         let root = library_with(&mut h, &shots);
-        if action.starts_with("preview") {
+        if action == "failure" {
+            h.app.page = 0;
+            step(&mut h, &mut raster, ppp, None);
+            let rgba = shot(1440, 900, 3);
+            let ctx = h.ctx.clone();
+            h.app.screenshot_save_failed(&ctx, "无法创建截图目录 E:/截图：系统找不到指定的路径。".into(), std::sync::Arc::new(crate::screenshot::library::images(1440, 900, &rgba)), 1);
+        } else if action.starts_with("preview") {
             h.app.page = 0;
             step(&mut h, &mut raster, ppp, None);
             let time = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap().and_hms_milli_opt(12, 0, 0, 0).unwrap();

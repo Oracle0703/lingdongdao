@@ -9,6 +9,6 @@ mod selection;
 #[cfg(windows)]
 mod service;
 #[cfg(windows)]
-pub use service::{Capture, CaptureEvent};
+pub use service::{Capture, CaptureEvent, UNSAVED};
 #[cfg(windows)]
 pub(crate) use service::{timing, SelectedImage};

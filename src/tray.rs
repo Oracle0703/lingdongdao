@@ -417,6 +417,13 @@ fn show_menu_at(hwnd: HWND, ctx: &Ctx, x: i32, y: i32) {
             }
             CMD_ABOUT => about(),
             CMD_EXIT => {
+                // 还有保存失败、只在内存里的截图：退出前提醒，默认按钮是「否」。
+                let unsaved = crate::screenshot::UNSAVED.load(Ordering::Acquire);
+                if unsaved > 0 {
+                    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO};
+                    let text = wide(&format!("还有 {unsaved} 张截图没有保存，退出后会丢失。仍要退出吗？"));
+                    if MessageBoxW(hwnd, PCWSTR(text.as_ptr()), w!("岛仔"), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES { return; }
+                }
                 // 原版：先摘图标，再结束进程
                 remove_icon(hwnd);
                 let _ = UnregisterHotKey(hwnd, SCREENSHOT_HOTKEY_ID);

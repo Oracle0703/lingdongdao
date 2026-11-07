@@ -224,6 +224,8 @@ impl Shell {
     #[cfg(windows)]
     fn begin_screenshot(&mut self, ctx: &egui::Context) {
         if self.app.is_screenshot_capturing() || !self.app.settings.visible_pages[app::SCREENSHOT_PAGE] { return; }
+        // 还有保存失败的截图：先让用户处理（重试、另选目录、复制或放弃），不开始新的框选。
+        if self.screenshot.as_ref().is_some_and(|capture| capture.has_failed()) { self.app.show_screenshot_failure(); return; }
         let Some(hwnd) = self.native.as_ref().map(|window| window.hwnd()) else {
             self.screenshot_notices.push(("无法开始截图".into(), "岛窗口尚未就绪，请稍后重试".into()));
             return;
@@ -283,9 +285,13 @@ impl Shell {
                     self.end_screenshot();
                     self.screenshot_notices.push(("截图失败".into(), error));
                 }
-                CaptureEvent::Saved { path, images, .. } => self.app.screenshot_saved(ctx, &path, images),
-                CaptureEvent::SaveFailed(error) => {
-                    self.screenshot_notices.push(("截图保存失败".into(), error));
+                CaptureEvent::Saved { path, images, .. } => {
+                    self.app.screenshot_saved(ctx, &path, images);
+                    if self.screenshot.as_ref().is_some_and(|capture| !capture.has_failed()) { self.app.clear_screenshot_failure(false); }
+                }
+                CaptureEvent::SaveFailed { error, images, pending } => {
+                    self.app.screenshot_save_failed(ctx, error.clone(), images, pending);
+                    self.screenshot_notices.push(("截图未能保存".into(), error));
                 }
                 CaptureEvent::Copied(result) => self.app.screenshot_copied(result),
             }
@@ -571,7 +577,28 @@ impl eframe::App for Shell {
                     }
                 },
                 Cmd::ScreenshotChooseFolder=>{
-                    #[cfg(windows)] match daozai::system::pick_folder("选择截图保存位置"){Ok(Some(dir))=>self.app.set_screenshot_dir(dir),Ok(None)=>{},Err(e)=>self.app.say(format!("无法选择文件夹：{}",e.code()))}
+                    #[cfg(windows)] match daozai::system::pick_folder("选择截图保存位置"){
+                        Ok(Some(dir))=>{
+                            self.app.set_screenshot_dir(dir);
+                            // 保存失败后另选了目录：立即按新目录重试。
+                            if let Some(capture)=self.screenshot.as_ref().filter(|capture|capture.has_failed()) {
+                                capture.retry_save(daozai::screenshot::store::resolve_root(&self.app.settings.screenshot_dir));
+                            }
+                        },
+                        Ok(None)=>{},
+                        Err(e)=>self.app.say(format!("无法选择文件夹：{}",e.code())),
+                    }
+                },
+                Cmd::ScreenshotRetrySave=>{
+                    #[cfg(windows)] if let Some(capture)=&self.screenshot { capture.retry_save(daozai::screenshot::store::resolve_root(&self.app.settings.screenshot_dir)); }
+                },
+                Cmd::ScreenshotCopyFailed=>{
+                    #[cfg(windows)] if let Some(capture)=&self.screenshot { capture.copy_failed(); }
+                },
+                Cmd::ScreenshotDiscardFailed=>{
+                    #[cfg(windows)] if let Some(capture)=&self.screenshot { capture.discard_failed(); }
+                    self.app.clear_screenshot_failure(true);
+                    self.app.say("已放弃未保存的截图");
                 },
                 Cmd::CalendarForget=>{
                     if let Err(error)=daozai::calendar::forget_config(){self.app.say(&error);continue;}

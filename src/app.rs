@@ -167,6 +167,10 @@ pub enum Cmd {
     ScreenshotCopy(PathBuf),
     /// 把这张截图移入回收站（已在岛上确认）。
     ScreenshotDelete(PathBuf),
+    /// 保存失败后：按当前设置的目录重试 / 复制未保存的截图 / 放弃。
+    ScreenshotRetrySave,
+    ScreenshotCopyFailed,
+    ScreenshotDiscardFailed,
 }
 
 pub struct FrameOut {

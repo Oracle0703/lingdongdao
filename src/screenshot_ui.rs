@@ -50,6 +50,9 @@ pub(crate) struct Preview {
     pub left_at: Option<f64>,
 }
 
+/// 保存失败、图片仍在内存里（设计文档第 5.2 节）。
+pub(crate) struct Failure { error: String, pending: usize, slot: Slot }
+
 #[derive(Default)]
 pub(crate) struct Gallery {
     library: Option<Library>,
@@ -69,6 +72,7 @@ pub(crate) struct Gallery {
     confirm_delete: Option<PathBuf>,
     swipe_at: f64,
     pub(crate) preview: Option<Preview>,
+    pub(crate) failure: Option<Failure>,
 }
 
 impl Gallery {
@@ -428,9 +432,54 @@ impl App {
         }
     }
 
+    /// 外壳报告保存失败：图片仍在内存里，展开岛提供重试、另选目录、复制和放弃。
+    pub fn screenshot_save_failed(&mut self, ctx: &egui::Context, error: String, images: Arc<Images>, pending: usize) {
+        self.shots.failure = Some(Failure { error, pending, slot: upload(ctx, Path::new("未保存的截图"), &images) });
+        self.start_screenshot_preview();
+    }
+
+    /// 有未处理的保存失败时再次截图：重新展开失败状态，不开始新的框选。
+    pub fn show_screenshot_failure(&mut self) {
+        if self.shots.failure.is_some() { self.start_screenshot_preview(); }
+    }
+
+    /// 失败的截图已重新保存（预览继续显示保存好的图）或被放弃（`close`：收起预览）。
+    pub fn clear_screenshot_failure(&mut self, close: bool) {
+        if self.shots.failure.take().is_some() && close { self.end_screenshot_preview(true); }
+    }
+
+    fn draw_failure(&mut self, c: &Card, cmds: &mut Vec<Cmd>) {
+        let Some(failure) = &self.shots.failure else { return };
+        let title = if failure.pending > 1 { format!("{} 张截图未能保存", failure.pending) } else { "截图未能保存".to_string() };
+        c.text(18.0, 25.0, &title, size::TITLE, W::Bold, theme::RED_TOP, H::Left);
+        c.fill(MAIN.0, MAIN.1, MAIN.2, MAIN.3, 10.0, theme::CARD);
+        if let Slot::Ready { width, height, preview, .. } = &failure.slot {
+            let rect = fit((*width, *height), (MAIN.0 + 4.0, MAIN.1 + 4.0, MAIN.2 - 8.0, MAIN.3 - 8.0));
+            image(&c.clipped(MAIN.0, MAIN.1, MAIN.2, MAIN.3), preview, rect, 6.0, Color32::from_white_alpha(200));
+        }
+        for (index, line) in c.wrap(&failure.error, size::SMALL, W::Regular, 380.0, 2).iter().enumerate() {
+            c.text(209.5, 186.0 + index as f32 * 14.0, line, size::SMALL, W::Regular, theme::GRAY, H::Center);
+        }
+        if button(c, 62.5, 60.0, "重试", "retry", false, true).clicked() { cmds.push(Cmd::ScreenshotRetrySave); }
+        if button(c, 130.5, 80.0, "另选目录", "choose", false, true).clicked() { cmds.push(Cmd::ScreenshotChooseFolder); }
+        if button(c, 218.5, 80.0, "复制图片", "copy-failed", false, true).clicked() { cmds.push(Cmd::ScreenshotCopyFailed); }
+        if button(c, 306.5, 52.0, "放弃", "discard", true, true).clicked() { cmds.push(Cmd::ScreenshotDiscardFailed); }
+    }
+
     /// 截图后的自动预览：标题行显示保存与复制状态，其余与截图页相同。返回 true 表示已绘制。
     pub(crate) fn draw_screenshot_preview(&mut self, c: &Card, cmds: &mut Vec<Cmd>) -> bool {
         let Some(preview) = &self.shots.preview else { return false };
+        if self.shots.failure.is_some() {
+            let until = preview.until;
+            self.draw_failure(c, cmds);
+            if let Some(until) = until {
+                c.text(368.0, 24.0, &format!("{} 秒后收起", (until - self.t).ceil().max(0.0) as u32), size::TINY, W::Regular, theme::DIM, H::Right);
+            }
+            let close = c.hit(380.0, 4.0, 28.0, 28.0, "shot-failure-close");
+            c.text(394.0, 23.0, "×", 18.0, W::Regular, if close.hovered() { theme::WHITE } else { theme::GRAY }, H::Center);
+            if close.clicked() { self.end_screenshot_preview(true); }
+            return true;
+        }
         let (until, copy) = (preview.until, preview.copy.clone());
         c.text(18.0, 25.0, "截图已保存", size::TITLE, W::Bold, theme::WHITE, H::Left);
         if let Some(until) = until {
