@@ -1012,7 +1012,8 @@ mod tests {
             drop(stream);listener
         });
         let cfg=Config{provider:Provider::DingTalk,username:"synthetic".into(),href:None,server:Some(base)};
-        let client=ureq::AgentBuilder::new().timeout(Duration::from_millis(200)).build();
+        // 超时只用来防止挂住；并行跑全部测试时本机回环也可能超过 200 毫秒，取 2 秒避免偶发失败。
+        let client=ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).build();
         assert_eq!(discover(&client,&cfg,"wrong").unwrap_err().status,Some(401));
         let listener=worker.join().unwrap();listener.set_nonblocking(true).unwrap();
         assert!(listener.accept().is_err());
