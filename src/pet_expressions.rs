@@ -101,13 +101,28 @@ impl Expressions {
 mod tests {
     use super::*;
     #[test]
-    fn all_twelve_expressions_are_reachable_through_real_scenarios(){
+    fn expressions_follow_real_scenarios_and_system_animation_setting(){
         let mut expressions=Expressions::default();let mut seen=std::collections::HashSet::new();
-        for _ in 0..8 {
-            while expressions.current().is_none(){expressions.step(PetState::Awake,0.1,true);}
-            seen.insert(expressions.current().unwrap() as usize);
-            while expressions.current().is_some(){expressions.step(PetState::Awake,0.1,true);}
-            for _ in 0..210 {expressions.step(PetState::Awake,0.1,true);assert!(expressions.current().is_none(),"日常动作之间应有安静间隔");}
+        let idle_animations=crate::bar_layout::animations_enabled();
+        if idle_animations {
+            for _ in 0..8 {
+                for _ in 0..400 {
+                    expressions.step(PetState::Awake,0.1,true);
+                    if expressions.current().is_some(){break;}
+                }
+                seen.insert(expressions.current().expect("日常表情应在等待时间内触发") as usize);
+                for _ in 0..100 {
+                    expressions.step(PetState::Awake,0.1,true);
+                    if expressions.current().is_none(){break;}
+                }
+                assert!(expressions.current().is_none(),"日常表情应按时结束");
+                for _ in 0..210 {expressions.step(PetState::Awake,0.1,true);assert!(expressions.current().is_none(),"日常动作之间应有安静间隔");}
+            }
+        }else{
+            for _ in 0..400 {
+                expressions.step(PetState::Awake,0.1,true);
+                assert!(expressions.current().is_none(),"系统关闭动画时应保持安静待机");
+            }
         }
         for _ in 0..4 {
             expressions.clear();expressions.step(PetState::Curious,0.1,true);seen.insert(expressions.current().unwrap() as usize);
@@ -115,7 +130,9 @@ mod tests {
         for state in [PetState::Happy,PetState::Happy,PetState::Happy,PetState::Happy,PetState::Satisfied,PetState::Satisfied] {
             expressions.react(state);seen.insert(expressions.current().unwrap() as usize);
         }
-        assert_eq!(seen.len(),Expression::ALL.len());
+        let expected=Expression::ALL.into_iter().filter(|expression|idle_animations || !matches!(expression,Expression::Scan|Expression::Peek|Expression::Search))
+            .map(|expression|expression as usize).collect::<std::collections::HashSet<_>>();
+        assert_eq!(seen,expected,"应覆盖当前系统动画设置下可触发的全部表情");
     }
     #[test]
     fn hidden_feedback_pauses_and_hover_has_a_cooldown(){
