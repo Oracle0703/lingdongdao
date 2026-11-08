@@ -2,7 +2,7 @@ use crate::{bar_layout::*,paint::{self,Card,H},theme::{self,W}};
 use eframe::egui::{self,Color32,RichText,Rect,Pos2,Vec2};
 
 pub(crate) fn preview_layout(order:&[usize],quotas:usize)->Layout {
-    let mut layout=Layout::new(Parts{battery:true,quotas:quotas.max(1),music:true,focus:true,bell:false,pet:true,salary:true,system:true});
+    let mut layout=Layout::with(Parts{battery:true,quotas:quotas.max(1),music:true,focus:true,bell:false,pet:true,salary:true,system:true});
     layout.reorder(order);layout
 }
 
@@ -17,15 +17,30 @@ impl crate::app::App {
             });
         });
         ui.add_space(12.0);
-        let count=self.quota_bar_indices().len();
+        let indices=self.quota_bar_indices();let count=indices.len();
         let mut layout=preview_layout(&order,count);
+        for (position,extra) in self.quota_balance_layout(ui.ctx()){layout.balance_tail(position,extra);}
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
         let (stage,_)=ui.allocate_exact_size(Vec2::new(ui.available_width(),100.0),egui::Sense::hover());
         ui.painter().rect_filled(stage,10.0,Color32::from_rgb(19,25,36));
         let scale=((stage.width()-28.0)/layout.width).min(1.0);
         let origin=Pos2::new(stage.center().x-layout.width*scale/2.0,stage.top());
+        // 预览跟随当前的皮肤与形状。
+        let pill=self.settings.island_shape==crate::model::IslandShape::Pill;
+        let origin=if pill{origin+Vec2::new(0.0,4.0)}else{origin};
         let body=Rect::from_min_size(origin,Vec2::new(layout.width*scale,30.0*scale));
-        crate::shape::fill(ui.painter(),body,8.0*scale,10.0*scale,12.0*scale,Color32::BLACK,1.0/ui.ctx().pixels_per_point());
+        let fill=self.preview_fill();
+        if pill {ui.painter().rect_filled(body,15.0*scale,fill);}
+        else {crate::shape::fill(ui.painter(),body,8.0*scale,10.0*scale,12.0*scale,fill,1.0/ui.ctx().pixels_per_point());}
+        if self.settings.skin.is_glass() {
+            let rim=egui::Stroke::new(1.0_f32,Color32::from_white_alpha(60));
+            if pill {ui.painter().rect_stroke(body,15.0*scale,rim,egui::StrokeKind::Inside);}
+            else {
+                let edge=Rect::from_min_max(body.min+Vec2::new(0.5,0.0),body.max-Vec2::new(0.5,0.5));
+                ui.painter().add(egui::Shape::line(crate::shape::outline(edge,8.0*scale,10.0*scale,12.0*scale-0.5),rim));
+            }
+        }
+        let content_from=crate::skin_paint::shape_count(ui.ctx(),ui.layer_id());
         let mut card=Card::new(ui,origin,stage);card.s=scale;
         let cx=layout.width/2.0;
         let pointer=ui.ctx().pointer_interact_pos();
@@ -35,10 +50,11 @@ impl crate::app::App {
         for (index,&slot) in order.iter().enumerate(){
             let x=cx+layout.x[slot].unwrap();
             let width=match slot{CLOCK=>if self.settings.clock_period!=0 {84.0}else{44.0},BATTERY=>20.0,PET=>32.0,MUSIC=>14.0,FOCUS=>crate::focus_bar::WIDTH,SALARY=>SALARY_WIDTH,SYSTEM=>crate::perf_ui::WIDTH,_=>{
-                let last=layout.x[MORE].or_else(||layout.x[QUOTA+count.min(3).max(1)-1]).unwrap();
-                last-layout.x[QUOTA].unwrap()+27.0
+                let left=layout.quota_slots().filter_map(|i|layout.x[i].map(|x|x-layout.widths[i]/2.0)).fold(f32::INFINITY,f32::min);
+                let right=layout.quota_slots().filter_map(|i|layout.x[i].map(|x|x+layout.widths[i]/2.0)).fold(f32::NEG_INFINITY,f32::max);
+                right-left
             }};
-            let left=if slot==QUOTA{x-13.5}else{x-width/2.0};
+            let left=if slot==QUOTA{cx+layout.quota_slots().filter_map(|i|layout.x[i].map(|x|x-layout.widths[i]/2.0)).fold(f32::INFINITY,f32::min)}else{x-width/2.0};
             let rect=card.rect(left-5.0,1.0,width+10.0,28.0);
             let response=ui.interact(rect,ui.id().with(("resident-icon",slot)),egui::Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Grab);
             response.dnd_set_drag_payload(slot);
@@ -54,7 +70,7 @@ impl crate::app::App {
             match slot{
                 BATTERY=>paint::battery(&c,x,15.0,self.resident_power.0,self.resident_power.1,1.0),
                 CLOCK=>{let text=self.settings.clock_text(&chrono::Local::now().format("%H:%M:%S").to_string());paint::clock(&c,x-paint::clock_width(&c,&text,theme::size::PILL_CLOCK)/2.0,21.0,&text,theme::size::PILL_CLOCK);},
-                PET=>self.pet.draw(&c,x,self.t),
+                PET=>self.pet.draw(&c,x,self.t,self.skin_palette()),
                 MUSIC=>paint::playback_bars(&c,x,15.0,self.t,self.media.playing,theme::WHITE),
                 FOCUS=>crate::focus_bar::draw(&c,x,15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false),
                 // 预览只用示例金额，不在设置窗口里显示真实收入。
@@ -65,6 +81,10 @@ impl crate::app::App {
             }
             if is_dragged {ui.painter().line_segment([Pos2::new(rect.center().x,body.bottom()+6.0),Pos2::new(rect.center().x,body.bottom()+12.0)],egui::Stroke::new(2.0,theme::BLUE));}
             response.on_hover_text(label(slot));
+        }
+        if let Some(palette)=self.skin_palette() {
+            let end=crate::skin_paint::shape_count(ui.ctx(),ui.layer_id());
+            crate::skin_paint::recolor_layer(ui.ctx(),ui.layer_id(),&[(content_from,end)],&palette);
         }
         if let Some((slot,index))=movement{
             if let Some(from)=order.iter().position(|value|*value==slot){order.remove(from);order.insert(index,slot);self.settings.resident_order=order;}

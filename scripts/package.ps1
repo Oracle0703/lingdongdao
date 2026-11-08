@@ -6,6 +6,10 @@ try {
     $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"]+)"').Groups[1].Value
     $appId = [regex]::Match((Get-Content src\brand.rs -Raw), 'macro_rules! app_id \{\s*\(\) => \{\s*"([A-Za-z0-9._-]+)"').Groups[1].Value
     if (-not $appId) { throw 'Cannot read APP_ID from src/brand.rs' }
+    # 发布版不嵌入构建机器的用户目录和项目路径：依赖源码路径换成中性前缀，PDB 只记文件名。
+    # 用 CARGO_ENCODED_RUSTFLAGS（\x1f 分隔）避免路径里的空格被拆开；它会覆盖 .cargo/config.toml 的 rustflags，所以带上 crt-static。
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+    $env:CARGO_ENCODED_RUSTFLAGS = @('-C', 'target-feature=+crt-static', "--remap-path-prefix=$cargoHome=cargo", "--remap-path-prefix=$projectRoot=daozai", '-C', 'link-arg=/PDBALTPATH:%_PDB%') -join [char]0x1f
     if (-not $SkipBuild) {
         $env:CARGO_BUILD_JOBS = '1'
         cargo +stable-x86_64-pc-windows-msvc build --locked --release --bin daozai --target x86_64-pc-windows-msvc
@@ -18,6 +22,10 @@ try {
     $binary = Get-Item -LiteralPath $Executable
     & (Join-Path $PSScriptRoot 'check-runtime.ps1') -Executable $binary.FullName
     if ($binary.VersionInfo.FileVersion -ne $version -and $binary.VersionInfo.FileVersion -ne "$version.0") { throw 'Executable version mismatch' }
+    $content = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($binary.FullName))
+    foreach ($private in @($env:USERPROFILE, $projectRoot)) {
+        if ($private -and $content.Contains($private)) { throw "Executable embeds a build-machine path: $private" }
+    }
     if (-not $NsisCompiler) {
         $compiler = Get-Command makensis.exe -ErrorAction SilentlyContinue
         if ($compiler) { $NsisCompiler = $compiler.Source }

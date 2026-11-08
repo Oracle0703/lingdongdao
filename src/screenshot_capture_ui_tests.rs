@@ -62,7 +62,7 @@ fn screenshot_capture_preserves_calendar_draft_and_rejects_task_dialog_or_drag()
     assert!(h.app.begin_screenshot());h.frame(vec![escape()]);h.app.end_screenshot();
     assert_eq!(h.app.calendar.draft.as_ref().unwrap().title,"未保存日程");
     h.app.cancel_edit();
-    h.app.todos.items.push(crate::model::TodoItem{text:"编辑任务".into(),done_on:None,due:None,reminded:false});
+    h.app.todos.items.push(crate::model::TodoItem{text:"编辑任务".into(),done_on:None,due:None,reminded:false,..Default::default()});
     h.app.open_task_dialog(0);assert!(!h.app.begin_screenshot());assert!(h.app.task_dialog.is_some());
     h.app.cancel_edit();h.app.drag_hot=true;
     assert!(!h.app.begin_screenshot());assert!(!h.app.is_screenshot_capturing());
