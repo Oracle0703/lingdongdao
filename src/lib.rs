@@ -38,6 +38,8 @@ mod resident_settings;
 mod avoidance;
 mod focus_bar;
 mod hourglass;
+pub mod perf;
+mod perf_ui;
 mod salary;
 mod salary_ui;
 mod screenshot_ui;

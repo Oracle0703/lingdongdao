@@ -923,6 +923,8 @@ impl App {
                         settings_card(ui,|ui|{
                             setting_row(ui,"电量","本机电量、充电状态与提醒；无电池设备自动隐藏",&mut self.settings.show_battery);
                             ui.separator();
+                            setting_row(ui,"系统监控","收起时显示 CPU、内存占用圆环；展开「系统」页看百分比和网速",&mut self.settings.system_island);
+                            ui.separator();
                             setting_row(ui,"岛上歌词","收起时显示正在唱的那一句",&mut self.settings.island_lyrics);
                         });
                         settings_label(ui,"功能页面");

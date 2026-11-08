@@ -44,14 +44,15 @@ pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整
 pub const WIN_H: f32 = 270.0;
 pub(crate) const SALARY_PAGE: usize = 8;
 /// 功能页数量。新增页面时改这里，并补齐下面三个数组和 `Settings` 的默认值（数组长度不符会编译失败）。
-pub(crate) const PAGE_COUNT: usize = 11;
+pub(crate) const PAGE_COUNT: usize = 12;
 pub const SCREENSHOT_PAGE: usize = 9;
 pub(crate) const HOURGLASS_PAGE: usize = 10;
-pub(crate) const PAGE_NAMES: [&str; PAGE_COUNT] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "工资", "截图", "沙漏"];
+pub(crate) const SYSTEM_PAGE: usize = 11;
+pub(crate) const PAGE_NAMES: [&str; PAGE_COUNT] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "工资", "截图", "沙漏", "系统"];
 /// 各页面齿轮对应的设置分组。
-pub(crate) const PAGE_SETTINGS_TABS: [usize; PAGE_COUNT] = [1, 2, 3, 5, 4, 7, 11, 8, crate::salary_ui::SETTINGS_TAB, crate::screenshot_ui::SETTINGS_TAB, 2];
+pub(crate) const PAGE_SETTINGS_TABS: [usize; PAGE_COUNT] = [1, 2, 3, 5, 4, 7, 11, 8, crate::salary_ui::SETTINGS_TAB, crate::screenshot_ui::SETTINGS_TAB, 2, 10];
 /// 设置 → 功能页面里每页的说明。
-pub(crate) const PAGE_DESCRIPTIONS: [&str; PAGE_COUNT] = ["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","按月薪实时计算今日收入","区域截图、历史浏览与复制拖出","翻转开始的沙漏倒计时"];
+pub(crate) const PAGE_DESCRIPTIONS: [&str; PAGE_COUNT] = ["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","按月薪实时计算今日收入","区域截图、历史浏览与复制拖出","翻转开始的沙漏倒计时","CPU、内存占用与实时网速"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -487,6 +488,8 @@ pub struct App {
     pub(crate) resize: Option<island_resize::Resize>,
     /// 沙漏页的倒计时。
     pub(crate) hourglass: crate::hourglass::State,
+    /// 系统监控的最新采样与最近一分钟的走势。
+    pub(crate) perf: crate::perf_ui::State,
 }
 
 impl App {
@@ -595,6 +598,7 @@ impl App {
             shots: Default::default(),
             resize: None,
             hourglass: crate::hourglass::State::new(hourglass_minutes),
+            perf: Default::default(),
         }
     }
 
@@ -1209,7 +1213,7 @@ impl App {
         self.todo_input_focused=false;
     }
 
-    fn island_lyrics_active(&self)->bool {
+    pub(crate) fn island_lyrics_active(&self)->bool {
         self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
             && !self.browser_minimal_active
             && self.ly.key==format!("{}|{}|{:.0}",self.media.title,self.media.artist,self.media.duration)
@@ -1262,7 +1266,7 @@ impl App {
         self.island_lyric_layout=Some(galley);
     }
 
-    fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active}
+    pub(crate) fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active}
     pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.effective_minimal()}
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     fn lyric_focus_space(&self)->f32 {if self.timer_on_island(){crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
@@ -1399,7 +1403,7 @@ impl App {
         self.update_media(env,&ctx);
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
-        let parts=bar::Parts{battery:self.settings.show_battery&&env.battery.is_some(),quotas:self.quota_bar_indices().len(),music:self.media.is_music()&&!bell,focus:self.timer_on_island(),bell,pet:self.pet_enabled(),salary:self.salary_on_island()};
+        let parts=bar::Parts{battery:self.settings.show_battery&&env.battery.is_some(),quotas:self.quota_bar_indices().len(),music:self.media.is_music()&&!bell,focus:self.timer_on_island(),bell,pet:self.pet_enabled(),salary:self.salary_on_island(),system:self.settings.system_island};
         let mut layout=Layout::fitted(parts,&self.settings.resident_order,if self.settings.clock_period!=0 {40.0}else{0.0},PW);
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
@@ -1522,9 +1526,13 @@ impl App {
         // 悬停在收起的工资金额上展开时，直接打开工资页。
         let salary_hover=!self.open && self.salary_bar_visible()
             && env.cursor.is_some_and(|c|(c.x-(cx+self.resident.position(bar::SALARY))).abs()<=bar::SALARY_WIDTH/2.0+6.0 && c.y-top<=BAR_H+4.0);
+        // 悬停在收起的系统监控圆环上展开时，直接打开系统页。
+        let system_hover=!self.open && self.system_bar_visible()
+            && env.cursor.is_some_and(|c|(c.x-(cx+self.resident.position(bar::SYSTEM))).abs()<=crate::perf_ui::WIDTH/2.0+6.0 && c.y-top<=BAR_H+4.0);
         let was_open=self.open;
         self.morph(want, inside, env.t, dt);
         if salary_hover && !was_open && self.open && !self.drag_hot {self.jump_page(SALARY_PAGE);}
+        if system_hover && !was_open && self.open && !self.drag_hot {self.jump_page(SYSTEM_PAGE);}
         self.update_pet(env, cx);
 
         // ---------- 绘制 ----------
@@ -1911,6 +1919,11 @@ impl App {
             let c=base.faded(alpha);let c=if alpha<0.8{c.ghost()}else{c};
             self.draw_salary_bar(&c,local_cx+x);
         }
+        if let Some(x)=layout.x[bar::SYSTEM].filter(|_|compact_alpha>0.004) {
+            let alpha=compact_alpha*layout.pet_clearance(bar::SYSTEM);
+            let c=base.faded(alpha);let c=if alpha<0.8{c.ghost()}else{c};
+            crate::perf_ui::draw_bar(&c,local_cx+x,15.0,self.perf.latest.as_ref());
+        }
     }
 
     fn update_pet(&mut self, env: &Env, cx: f32) {
@@ -1990,6 +2003,7 @@ impl App {
             SALARY_PAGE => ("今日", "工资", theme::YELLOW),
             SCREENSHOT_PAGE => ("截图", "", theme::WHITE),
             HOURGLASS_PAGE => ("沙漏", "计时", crate::hourglass::SAND),
+            SYSTEM_PAGE => ("系统", "监控", crate::perf_ui::CPU_INK),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -2053,6 +2067,7 @@ impl App {
             SALARY_PAGE => self.page_salary(c),
             SCREENSHOT_PAGE => self.page_screenshot(c, env, cmds),
             HOURGLASS_PAGE => self.page_hourglass(c),
+            SYSTEM_PAGE => self.page_system(c),
             _ => self.page_settings(c),
         }
     }
@@ -2105,6 +2120,7 @@ impl App {
             }
         }
         self.tick_hourglass(elapsed);
+        self.tick_perf();
         self.ring_shown.target = (self.pomo.remaining / self.phase_secs(self.pomo.phase)).clamp(0.0, 1.0);
         self.ring_shown.step(dt);
         self.reset_spin.step(dt);

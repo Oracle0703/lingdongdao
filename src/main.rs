@@ -21,6 +21,9 @@ struct Shell {
     media_sources: smtc::Sources,
     seek_rx: Option<std::sync::mpsc::Receiver<bool>>,
     media_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 系统监控采样：是否需要采样，以及采样结果。
+    perf_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    perf_rx: std::sync::mpsc::Receiver<daozai::perf::Sample>,
     placed: bool,
     placement_at: PollClock,
     placement_scale: f32,
@@ -103,6 +106,8 @@ impl Shell {
         let media_sources=std::sync::Arc::new(std::sync::Mutex::new(smtc::SourceState{preferred:app.settings.music_source.clone(),..Default::default()}));
         let media_enabled=smtc::spawn_poller_with_sources(media.clone(),cc.egui_ctx.clone(),media_sources.clone());
         media_enabled.store(app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
+        let perf_enabled=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(app.perf_wanted()));
+        let perf_rx=daozai::perf::monitor(perf_enabled.clone());
         #[cfg(windows)]
         let autostart = daozai::tray::autostart_enabled();
         #[cfg(windows)]
@@ -143,6 +148,8 @@ impl Shell {
             media_sources,
             seek_rx: None,
             media_enabled,
+            perf_enabled,
+            perf_rx,
             placed: false,
             placement_at: PollClock::default(),
             placement_scale: 0.0,
@@ -370,6 +377,9 @@ impl eframe::App for Shell {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.media_enabled.store(self.app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
+        // 系统监控的结果在正常刷新时取走，不为它额外唤醒窗口。
+        self.perf_enabled.store(self.app.perf_wanted(),std::sync::atomic::Ordering::Relaxed);
+        while let Ok(sample)=self.perf_rx.try_recv(){self.app.push_perf(sample);}
         if let Ok(mut sources)=self.media_sources.lock(){sources.preferred.clone_from(&self.app.settings.music_source);}
         #[cfg(windows)]
         {

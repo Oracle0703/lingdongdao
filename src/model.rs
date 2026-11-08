@@ -153,6 +153,8 @@ pub struct Settings {
     pub screenshot_dir: String,
     /// 截图快捷键预设的键名，取值见 `SCREENSHOT_HOTKEYS`。
     pub screenshot_hotkey: String,
+    /// 收起时在岛上显示 CPU、内存占用圆环。
+    pub system_island: bool,
     /// 沙漏页一轮的时长（分钟）。
     pub hourglass_minutes: u32,
     /// 用户拖动设定的收起宽度（逻辑点）；0 表示自动。普通药丸与歌词岛分别记住。
@@ -174,7 +176,7 @@ pub const UI_SCALES: [u16; 6] = [100, 110, 120, 130, 140, 150];
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false,true,true], page_order: std::array::from_fn(|page| page), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, ui_scale: 100, screenshot_dir: String::new(), screenshot_hotkey: "alt_a".into(), hourglass_minutes: 3, pill_width: 0, lyric_width: 0 }
+        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false,true,true,true], page_order: std::array::from_fn(|page| page), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, ui_scale: 100, screenshot_dir: String::new(), screenshot_hotkey: "alt_a".into(), system_island: true, hourglass_minutes: 3, pill_width: 0, lyric_width: 0 }
     }
 }
 
@@ -221,6 +223,7 @@ impl Settings {
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
+                "system_island" => s.system_island = v != "0",
                 "visible_pages" if (6..=crate::app::PAGE_COUNT).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     // 6、7 号页面跟随任一已开页面；8 号及以后的新页面保持默认值（工资页默认关闭）。
@@ -295,6 +298,7 @@ impl Settings {
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
                 ("focus_minutes".into(), self.focus_minutes.to_string()),
                 ("hourglass_minutes".into(), self.hourglass_minutes.to_string()),
+                ("system_island".into(), (self.system_island as u8).to_string()),
                 ("rest_minutes".into(), self.rest_minutes.to_string()),
                 ("water_minutes".into(), self.water_minutes.to_string()),
                 ("serving_ml".into(), self.serving_ml.to_string()),
