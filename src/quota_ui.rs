@@ -184,7 +184,7 @@ fn claude_disclaimer(ui:&mut egui::Ui){
 }
 impl App {
     /// [二开] 上游直接保存的地方：保存失败时提示（连接结果保留在内存里，下次保存时再写入）。
-    fn save_quota_config(&mut self){if let Err(error)=self.quota.config.save(){self.say(format!("AI 额度设置保存失败：{error}"));}}
+    fn save_quota_config(&mut self)->bool{if let Err(error)=self.quota.config.save(){self.say(format!("AI 额度设置保存失败：{error}"));false}else{true}}
     fn persist_quota(&mut self,previous:Config)->bool {
         if let Err(error)=self.quota.config.save(){
             self.quota.config=previous;
@@ -205,8 +205,9 @@ impl App {
             self.quota.deepseek_connecting=None;
             match result{Ok(connected)=>{let old=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).cloned();
                 let id=if let Some(target)=self.quota.connect_target.as_deref(){match self.quota.config.reconnect_deepseek(target,connected.slot.clone(),connected.label){Ok(id)=>id,Err(error)=>{self.quota.note=error;return;}}}else{self.quota.config.connect_deepseek(connected.slot.clone(),connected.label)};
-                if let Some(old)=old.filter(|a|a.slot.as_deref()!=Some(&connected.slot)){quota::deepseek::forget(&old);}
-                self.quota.connect_target=None;self.quota.stale.remove(&id);self.quota.rows.insert(id,Ok(connected.snapshot));self.quota.save_snapshots();self.save_quota_config();self.quota.note="DeepSeek 已连接".into();self.pending.push(Cmd::QuotaConnected);},Err(error)=>self.quota.note=error}
+                // [二开] 旧 API Key 等新配置保存成功后再删除。
+                let replaced=old.filter(|a|a.slot.as_deref()!=Some(&connected.slot));
+                self.quota.connect_target=None;self.quota.stale.remove(&id);self.quota.rows.insert(id,Ok(connected.snapshot));self.quota.save_snapshots();if self.save_quota_config(){if let Some(old)=replaced{quota::deepseek::forget(&old);}}self.quota.note="DeepSeek 已连接".into();self.pending.push(Cmd::QuotaConnected);},Err(error)=>self.quota.note=error}
         }
         let result=self.quota.gemini_connecting.as_ref().and_then(|connect|connect.poll());
         if let Some(result)=result{
@@ -358,10 +359,12 @@ impl App {
         }
         self.quota.connect_target=id;self.quota.connect_open=true;
     }
-    fn quota_remove_account(&mut self,id:&str){
-        if let Some(a)=self.quota.config.accounts.iter().find(|a|a.id==id){match a.provider{Provider::GrokBot=>quota::grok::forget(a),Provider::Gemini=>quota::gemini::forget(a),Provider::DeepSeek=>quota::deepseek::forget(a),Provider::WorkBuddy=>quota::workbuddy::forget(a),_=>{}}}
+    /// 从配置里移除账号；本机保存的登录凭据等配置保存成功后再删除（见 `forget_quota_login`）。
+    fn quota_remove_account(&mut self,id:&str)->Option<quota::Account>{
+        let removed=self.quota.config.accounts.iter().find(|a|a.id==id).cloned();
         self.quota.config.accounts.retain(|a|a.id!=id);self.quota.config.colors.remove(id);self.quota.rows.remove(id);self.quota.stale.remove(id);self.quota.busy.remove(id);self.quota.save_snapshots();
         if self.quota.config.selected==id{self.quota.config.selected=self.quota.config.accounts.first().map(|a|a.id.clone()).unwrap_or_default();}
+        removed
     }
     pub(crate) fn quota_settings(&mut self,ui:&mut egui::Ui){
         // [二开] 配置读取失败时提示，并禁止覆盖保存（见 persist_quota）。
@@ -442,13 +445,13 @@ impl App {
             ui.add_space(8.0);
         }
         if let Some((from,to))=reorder{self.quota.config.move_account(&from,&to);}
-        if let Some(id)=remove{self.quota_remove_account(&id);}
+        let removed=remove.and_then(|id|self.quota_remove_account(&id));
         if let Some(id)=connect{self.quota_open_connection(Some(id));}
         if let Some(id)=rebind{match self.quota.config.confirm_current_login(&id){Ok(())=>{self.quota.rows.remove(&id);self.quota.note="已重新绑定当前登录".into();},Err(error)=>self.quota.note=error}}
         if !self.quota.connect_open&&!self.quota.note.is_empty(){ui.add_space(8.0);ui.label(egui::RichText::new(&self.quota.note).size(12.0).color(ui.visuals().weak_text_color()));}
         self.quota_connect_window(ui.ctx());
-        // [二开] 保存失败时恢复原值并提示。
-        if before!=self.quota.config{self.persist_quota(before);}
+        // [二开] 保存失败时恢复原值并提示；移除的账号在保存成功后才删除本机凭据，失败时账号和凭据都还在。
+        if before!=self.quota.config && self.persist_quota(before) {if let Some(account)=removed {forget_quota_login(&account);}}
     }
     fn quota_connect_window(&mut self,ctx:&egui::Context){
         if !self.quota.connect_open{return;}let mut open=true;
@@ -773,4 +776,9 @@ impl App {
             self.quota.config.selected=a.id.clone();self.save_quota_config();self.show_page(6);
         }
     }
+}
+
+/// [二开] 删除账号在本机保存的登录凭据（配置保存成功后调用）。
+fn forget_quota_login(account:&quota::Account){
+    match account.provider{Provider::GrokBot=>quota::grok::forget(account),Provider::Gemini=>quota::gemini::forget(account),Provider::DeepSeek=>quota::deepseek::forget(account),Provider::WorkBuddy=>quota::workbuddy::forget(account),_=>{}}
 }

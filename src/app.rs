@@ -967,7 +967,12 @@ impl App {
                 self.mail.digests.reset(&account);
                 if self.mail.open_uid.as_ref().is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(&account)) {self.mail.open_uid = None;}
                 if self.mail.reading.as_ref().is_some_and(|item| item.account.eq_ignore_ascii_case(&account)) {self.mail.reading = None;}
-                self.mail.privacy.retain(&self.mail.recent);
+                // 上游邮箱整理按旧 UID 记录的列表、本机回收站与待办状态一并作废，并尽快按新 UID 重新加载。
+                self.mail.manage.data.retain(|(email,_),_| !email.eq_ignore_ascii_case(&account));
+                if !self.settings.mail_sync_operations {self.mail.manage.trash.retain(|item| !item.account.eq_ignore_ascii_case(&account));}
+                self.mail.manage.forget_account(&account);
+                self.mail.manage.next_refresh=0.0;
+                self.mail.privacy.retain(self.mail.recent.iter().chain(&self.mail.manage.trash).chain(&self.mail.reading));
                 self.clear_stale_mail_alerts();
             }
             mail::Event::Managed(done)=>self.mail_managed(done),
@@ -988,7 +993,7 @@ impl App {
                 if !updates.is_empty() {
                     self.mail.invitations.observe(&item.account, item.uid, updates);
                     for item in &mut self.mail.recent {self.mail.invitations.reconcile(item);}
-                    if let Some(item) = &mut self.mail.reading {self.mail.invitations.reconcile(item);}
+                    if !self.mail.manage.reader_trash {if let Some(item) = &mut self.mail.reading {self.mail.invitations.reconcile(item);}}
                     self.clear_stale_mail_alerts();
                 }
                 self.mail.invitations.reconcile(&mut item);
@@ -1038,7 +1043,7 @@ impl App {
         }
     }
 
-    fn clear_stale_mail_alerts(&mut self) {
+    pub(crate) fn clear_stale_mail_alerts(&mut self) {
         let stale = |alert: &Alert| alert.meeting.as_ref().is_some_and(|(event, source)|
             source == "邮件邀请" && !self.mail.recent.iter().any(|item| item.meeting.as_ref() == Some(event)));
         self.alerts.retain(|alert| !stale(alert));
@@ -1548,7 +1553,7 @@ impl App {
     /// 收起时岛上实际画出了工资组件（歌词、极简、通知横幅都会占用岛体）。
     pub(crate) fn salary_bar_visible(&self) -> bool {
         self.resident.target.x[bar::SALARY].is_some() && self.notice.is_none()
-            && !self.island_lyrics_active() && !self.effective_minimal()
+            && !self.island_lyrics_active() && !self.effective_minimal() && !self.side()
     }
 
     fn page_e(&self) -> f32 {
@@ -1651,7 +1656,10 @@ impl App {
         let content_width=self.lyric_bar_width()-self.lyric_focus_space();
         let width=self.w.pos.max(content_width);
         let right=cx-width/2.0+content_width;
-        Some(Rect::from_min_max(Pos2::new(right-LYRIC_CONTROLS_W,top),Pos2::new(right-2.0,top+BAR_H)))
+        // 与 shared_header 一样：组件太多时整条按比例缩小绘制，命中区随之缩放。
+        let fit=((WIN_W-32.0)/self.resident.target.width).min(1.0);
+        let at=|x:f32,y:f32|Pos2::new(cx+(x-cx)*fit,top+15.0+(y-top-15.0)*fit);
+        Some(Rect::from_min_max(at(right-LYRIC_CONTROLS_W,top),at(right-2.0,top+BAR_H)))
     }
     fn notice_size(&self,a:&Alert)->(f32,f32) {
         let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
@@ -1852,7 +1860,7 @@ impl App {
         let mut gallery_handled = false;
         if gallery_input && !self.is_editing() && inside && self.open && self.reveal > 0.95 {
             let (scroll_y, scroll_x, left, right) = ctx.input(|i| (i.raw_scroll_delta.y, i.raw_scroll_delta.x, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight)));
-            let cursor = env.cursor.map(|c| c - Vec2::new(cx - PW / 2.0, top));
+            let cursor = env.cursor.map(|c| c - self.content_origin(win).to_vec2());
             gallery_handled = self.screenshot_input(cursor, scroll_y, scroll_x, left, right) || self.shots.preview.is_some();
             if gallery_handled { self.wheel_delta = 0.0; }
         }
@@ -2155,7 +2163,7 @@ impl App {
         let salary_visible=if self.open {self.page==SALARY_PAGE}else{!minimal_pill && self.salary_bar_visible()};
         let ambient=self.settings.skin==model::Skin::Fluid && self.fluid.animating() || self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
             || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
-            || self.hourglass.running && (self.open && self.page==HOURGLASS_PAGE || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
+            || self.hourglass.running && (self.open && self.page==HOURGLASS_PAGE || !self.open && !self.side() && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
             || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some())
             || salary_visible && self.salary_animating(self.open);
         let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping;

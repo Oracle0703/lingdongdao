@@ -146,7 +146,9 @@ impl Shell {
         #[cfg(windows)]
         let native = daozai::native::Window::new(cc);
         // 岛体大小只作用于主窗口，在首帧之前生效，避免启动时先按 100% 闪一下。
-        #[cfg(windows)] eframe::set_root_viewport_scale(app.settings.island_scale());
+        // [二开] 先读出显示器，首帧就按所在屏幕的上限显示，不先放大再缩回。
+        #[cfg(windows)] { app.displays=daozai::display_layout::connected(); }
+        #[cfg(windows)] eframe::set_root_viewport_scale(limited_island_scale(&mut app,native.as_ref()));
         Self {
             app,
             t0: Instant::now(),
@@ -289,13 +291,7 @@ impl Shell {
     /// 岛的大小（上游 `island_scale`）。[二开] 顶部停靠时再按所在屏幕限制，保证右侧通知区不超出屏幕；
     /// 同时记下这块屏幕最多能放到多大，供设置页提示。
     fn island_scale(&mut self) -> f32 {
-        let requested=self.app.settings.island_scale();
-        if self.app.settings.dock.is_side() || self.app.is_screenshot_capturing() {return requested;}
-        let Some(window)=&self.native else{return requested};
-        let system=window.dpi_scale();
-        let bounds=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|d.bounds);
-        self.app.ui_scale_max=(daozai::display_layout::island_zoom(daozai::model::ISLAND_SIZE_MAX,bounds,system)*100.0).round() as u16;
-        daozai::display_layout::island_zoom(self.app.settings.island_size,bounds,system)
+        limited_island_scale(&mut self.app,self.native.as_ref())
     }
 
     #[cfg(windows)]
@@ -639,7 +635,7 @@ impl eframe::App for Shell {
             // 保留主窗口的事件循环，避免全屏隐藏后设置窗口无法关闭或重新打开。
             let region=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.region)};
             let hit=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
-            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},if self.hidden{None}else{out.glass.as_deref()},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded, out.morphing);
+            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},if self.hidden{None}else{out.glass.as_deref()},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded, out.morphing && !self.hidden);
         }
         for cmd in out.cmds {
             match cmd {
@@ -806,7 +802,8 @@ impl eframe::App for Shell {
         #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;
         // 形变中立即请求下一帧，由下一帧开头的 DwmFlush 对齐屏幕刷新。
-        #[cfg(windows)] { self.vblank=out.morphing && !self.hidden; }
+        // [二开] 轮廓裁剪的兼容渲染每帧都要重设窗口区域，按屏幕刷新出帧反而更卡，这时仍用帧间隔限速。
+        #[cfg(windows)] { self.vblank=out.morphing && !self.hidden && !self.native.as_ref().is_some_and(|w|w.opaque_surface()); }
         #[cfg(windows)] if self.vblank { ctx.request_repaint(); } else { schedule_repaint(ctx,repaint_after); }
         #[cfg(not(windows))] schedule_repaint(ctx,repaint_after);
     }
@@ -903,6 +900,19 @@ fn cursor_logical(ppp: f32) -> Option<(f32, f32)> {
     let mut p = POINT::default();
     unsafe { GetCursorPos(&mut p) }.ok()?;
     Some((p.x as f32 / ppp, p.y as f32 / ppp))
+}
+
+/// 岛的大小（上游 `island_scale`）。[二开] 顶部停靠时再按所在屏幕限制，保证右侧通知区不超出屏幕；
+/// 同时记下这块屏幕最多能放到多大，供设置页提示和拖动边缘时封顶。左右停靠不受此限制。
+#[cfg(windows)]
+fn limited_island_scale(app:&mut app::App,native:Option<&daozai::native::Window>)->f32 {
+    let requested=app.settings.island_scale();
+    if app.settings.dock.is_side() {app.ui_scale_max=daozai::model::ISLAND_SIZE_MAX as u16;return requested;}
+    let Some(window)=native else{return requested};
+    let system=window.dpi_scale();
+    let bounds=daozai::display_layout::selected(&app.displays,&app.settings.display_id).map(|d|d.bounds);
+    app.ui_scale_max=(daozai::display_layout::island_zoom(daozai::model::ISLAND_SIZE_MAX,bounds,system)*100.0).round() as u16;
+    daozai::display_layout::island_zoom(app.settings.island_size,bounds,system)
 }
 
 /// 光标的屏幕物理像素坐标（拖动缩放岛时使用）。

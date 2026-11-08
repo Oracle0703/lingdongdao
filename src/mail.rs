@@ -966,21 +966,17 @@ mod service {
         let mut last_uid = None;
         let mut last_validity=None;
         let mut failures=0;
+        // [二开] 停用或替换后的旧线程（例如卡在连接里）不能再上报状态，覆盖新线程的“已连接”。
+        let report=|status:Status|{if !stop.load(Ordering::Relaxed){let _=ev.send(Event::Status{account:account.email.clone(),status});}};
         loop {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            let _ = ev.send(Event::Status {
-                account: account.email.clone(),
-                status: Status::Connecting,
-            });
+            report(Status::Connecting);
             let password = match secrets::load(&account.credential_key()) {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = ev.send(Event::Status {
-                        account: account.email.clone(),
-                        status: Status::Auth(e),
-                    });
+                    report(Status::Auth(e));
                     if sleep_stop(&stop, next_retry_delay(60,&mut failures)) {
                         return;
                     }
@@ -990,10 +986,7 @@ mod service {
             let mut session = match net::connect(&account, &password) {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = ev.send(Event::Status {
-                        account: account.email.clone(),
-                        status: Status::Failed(e),
-                    });
+                    report(Status::Failed(e));
                     if sleep_stop(&stop, next_retry_delay(30,&mut failures)) {
                         return;
                     }
@@ -1002,10 +995,7 @@ mod service {
             };
             if stop.load(Ordering::Relaxed){let _=session.logout();return;}
             let Ok(mailbox)=session.select("INBOX") else {
-                let _ = ev.send(Event::Status {
-                    account: account.email.clone(),
-                    status: Status::Failed("无法打开收件箱".into()),
-                });
+                report(Status::Failed("无法打开收件箱".into()));
                 if sleep_stop(&stop, next_retry_delay(30,&mut failures)) {
                     return;
                 }
@@ -1013,14 +1003,15 @@ mod service {
             };
             if mailbox.uid_validity.is_none() || mailbox.uid_validity!=last_validity{
                 // [二开] 邮箱 UID 空间变了：界面里按旧 UID 缓存的邮件必须失效。
-                if last_validity.is_some() {let _=ev.send(Event::MailboxReset{account:account.email.clone()});}
+                if last_validity.is_some() && !stop.load(Ordering::Relaxed) {let _=ev.send(Event::MailboxReset{account:account.email.clone()});}
+                fetch_reset();
                 last_uid=None;
             }
             last_validity=mailbox.uid_validity;
             let connected_at=std::time::Instant::now();
             match monitor(&mut session,&account,&mut last_uid,&stop,&interval,&ev) {
                 Ok(())=>return,
-                Err(note)=>{let _=ev.send(Event::Status{account:account.email.clone(),status:Status::Failed(note)});}
+                Err(note)=>report(Status::Failed(note)),
             }
             if connected_at.elapsed()>=Duration::from_secs(60){failures=0;}
             if sleep_stop(&stop, next_retry_delay(10,&mut failures)) {
@@ -1039,7 +1030,7 @@ mod service {
         }
         let mut allow_noop=true;
         let mut idle_supported=session.capabilities().map_err(|_|"读取收信能力失败，正在重连")?.has_str("IDLE");
-        let _=ev.send(Event::Status{account:account.email.clone(),status:Status::Ready});
+        if !stop.load(Ordering::Relaxed){let _=ev.send(Event::Status{account:account.email.clone(),status:Status::Ready});}
         loop {
             if stop.load(Ordering::Relaxed){let _=session.logout();return Ok(());}
             let previous=*last_uid;
@@ -1330,13 +1321,46 @@ mod service {
         let max = uids.last().copied().unwrap_or(0);
         let tail: Vec<u32> = uids.iter().rev().take(20).rev().copied().collect();
         for uid in tail {
+            if fetch_skipped(uid) {continue;}
             match super::fetch::item_with_updates(session,uid,account){
-                Ok(Some(fetched))=>{let _=deliver(fetched,false,ev);},
-                Ok(None)=>{},
-                Err(())=>return Err(()),
+                Ok(Some(fetched))=>{fetch_succeeded(uid);let _=deliver(fetched,false,ev);},
+                Ok(None)=>fetch_succeeded(uid),
+                Err(())=>{fetch_failed(uid);return Err(());},
             }
         }
         Ok(max)
+    }
+
+    // [二开] 同一封邮件在重连后仍连续读取失败（例如服务器返回无法解析的结构）时放弃它，
+    // 避免一封坏邮件挡住之后的所有新邮件。邮件仍在服务器上，可以在邮箱客户端查看。
+    // 每个账号的收信在自己的线程里运行，所以按线程记录；邮箱 UID 空间变化时清空。
+    const MAX_FETCH_ATTEMPTS: u8 = 3;
+    thread_local! {
+        static FETCH_FAILURES: std::cell::RefCell<(Option<(u32,u8)>,std::collections::HashSet<u32>)> = Default::default();
+    }
+    fn fetch_skipped(uid:u32)->bool {FETCH_FAILURES.with(|f|f.borrow().1.contains(&uid))}
+    fn fetch_failed(uid:u32) {
+        FETCH_FAILURES.with(|f|{
+            let mut f=f.borrow_mut();
+            let attempts=match f.0 {Some((failed,count)) if failed==uid=>count+1,_=>1};
+            if attempts>=MAX_FETCH_ATTEMPTS {f.1.insert(uid);f.0=None;} else {f.0=Some((uid,attempts));}
+        });
+    }
+    fn fetch_succeeded(uid:u32) {FETCH_FAILURES.with(|f|{let mut f=f.borrow_mut();if f.0.is_some_and(|(failed,_)|failed==uid){f.0=None;}});}
+    fn fetch_reset() {FETCH_FAILURES.with(|f|*f.borrow_mut()=Default::default());}
+
+    #[test]
+    fn a_message_that_keeps_failing_is_skipped_after_three_attempts() {
+        fetch_reset();
+        fetch_failed(41);fetch_failed(41);
+        assert!(!fetch_skipped(41),"两次失败仍会重试");
+        fetch_succeeded(41);fetch_failed(41);fetch_failed(41);
+        assert!(!fetch_skipped(41),"中间成功过就重新计数");
+        fetch_failed(41);
+        assert!(fetch_skipped(41),"连续三次失败后跳过");
+        fetch_failed(42);fetch_failed(43);fetch_failed(42);
+        assert!(!fetch_skipped(42),"失败的邮件换了就重新计数");
+        fetch_reset();assert!(!fetch_skipped(41),"UID 空间变化后清空");
     }
 
     #[test]
@@ -1425,8 +1449,11 @@ mod service {
         uids.sort_unstable();
         uids.truncate(5);
         for uid in uids {
-            if let Some(fetched)=super::fetch::item_with_updates(session,uid,account)? {
-                let _=deliver(fetched,true,ev);
+            if !fetch_skipped(uid) {
+                match super::fetch::item_with_updates(session,uid,account) {
+                    Ok(fetched)=>{fetch_succeeded(uid);if let Some(fetched)=fetched {let _=deliver(fetched,true,ev);}},
+                    Err(())=>{fetch_failed(uid);return Err(());},
+                }
             }
             *last = (*last).max(uid);
         }

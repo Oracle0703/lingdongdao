@@ -165,7 +165,7 @@ pub(crate) struct Motion {
     initialized: bool,
 }
 impl Default for Motion {
-    fn default()->Self {Self {target:Layout::new(false,0,false,false,false,false),positions:vec![Spring::new(0.0,360.0,0.76);10],initialized:false}}
+    fn default()->Self {Self {target:Layout::new(false,0,false,false,false,false),positions:vec![Spring::new(0.0,360.0,0.76);WIDTHS.len()],initialized:false}}
 }
 impl Motion {
     pub fn step(&mut self,target:Layout,dt:f32,animate:bool) {

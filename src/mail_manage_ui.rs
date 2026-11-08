@@ -22,6 +22,14 @@ impl State{
     }
     pub fn ready(&self,account:&str,folder:Folder)->bool{self.pending.is_empty()&&self.data.contains_key(&(account.to_ascii_lowercase(),folder))}
 }
+impl State {
+    /// [二开] 邮箱 UID 空间重置后，清掉按旧 UID 记下的自动已读与阅读窗口身份。
+    pub(crate) fn forget_account(&mut self,account:&str){
+        if self.auto_read.as_ref().is_some_and(|(email,_)|email.eq_ignore_ascii_case(account)){self.auto_read=None;}
+        if self.reader_identity.as_ref().is_some_and(|(a,_)|a.email.eq_ignore_ascii_case(account)){self.reader_identity=None;}
+    }
+}
+
 impl App{
     fn mail_physical_folder(&self,folder:Folder)->Folder{if !self.settings.mail_sync_operations{Folder::Inbox}else{folder}}
     fn mail_local_key(&self,item:&Item)->Option<String>{
@@ -184,6 +192,12 @@ impl App{
         }else if request.action==Action::ReadAll{self.mail.manage.message="已将邮箱未读邮件标为已读".into();}
         else{self.mail.manage.message=String::new();}
         self.mail.privacy.retain(self.mail.recent.iter().chain(&self.mail.manage.trash).chain(&self.mail.reading));
+        // [二开] 刷新换回的邮件重新套用已收到的会议邀请修订（取消、改期），并清掉作废的会议提醒。
+        if request.folder==Folder::Inbox {
+            for item in &mut self.mail.recent {self.mail.invitations.reconcile(item);}
+            if !self.mail.manage.reader_trash {if let Some(item)=&mut self.mail.reading {self.mail.invitations.reconcile(item);}}
+            self.clear_stale_mail_alerts();
+        }
         self.mail.manage.identities.insert(email.clone(),request.account);
         self.mail.manage.data.insert((email,request.folder),snapshot);
         if !self.mail.manage.errors.is_empty(){self.mail.manage.message=self.mail.manage.errors.join("；");}

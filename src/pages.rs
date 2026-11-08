@@ -1095,7 +1095,7 @@ impl App {
         content.style_mut().spacing.scroll.floating=false;
         content.spacing_mut().scroll.bar_width=4.0*c.s;
         egui::ScrollArea::vertical().id_salt(("mail-body",&item.account,item.uid)).max_height(90.0*c.s).auto_shrink([false,false]).show(&mut content,|ui|{
-            if crate::mail_digest::eligible(raw) {
+            if crate::mail_digest::eligible(raw) && !self.mail.manage.trash_open {
                 if c.live {self.mail.digests.request(raw,ui.ctx());}
                 match self.mail.digests.get(raw).cloned() {
                     Some(crate::mail_digest::Digest::Pending)=>{ui.label(egui::RichText::new("AI 摘要生成中…").font(c.font(12.0,W::Regular)).color(theme::GRAY));},

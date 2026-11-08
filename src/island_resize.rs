@@ -87,7 +87,8 @@ impl App {
         let value = match kind {
             ResizeKind::Pill => self.base_size().0,
             ResizeKind::Lyric => self.lyric_width(),
-            ResizeKind::Panel => self.settings.island_size as f32,
+            // 从屏幕上实际显示的大小算起（可能被所在屏幕的上限压低）。
+            ResizeKind::Panel => self.settings.island_size.min(u32::from(self.ui_scale_max)) as f32,
         };
         self.resize = Some(Resize { kind, side, start, value, ppp: ctx.pixels_per_point(), before: self.settings.clone() });
         self.hover_since = None;
@@ -116,7 +117,8 @@ impl App {
                 let scale = resize.value * (1.0 + 2.0 * delta / (PW * resize.ppp));
                 // 上游的岛体大小按 5% 步进，拖动中和松开时都取到最近的一档。
                 let _ = last;
-                self.settings.island_size = model::island_size_value(scale.max(0.0).round() as u32);
+                let cap = u32::from(self.ui_scale_max).max(model::ISLAND_SIZE_MIN);
+                self.settings.island_size = model::island_size_value((scale.max(0.0).round() as u32).min(cap));
             }
         }
     }

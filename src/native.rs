@@ -48,7 +48,7 @@ fn inside_hit(x: i32, y: i32) -> bool {
 fn next_region(current:(i32,i32,i32,i32),wanted:(i32,i32,i32,i32),morphing:bool)->Option<(i32,i32,i32,i32)> {
     if current==wanted {return None;}
     // 首帧或需要强制重设（哨兵 i32::MIN）时直接设置。
-    if !morphing || current==(0,0,0,0) || current.0==i32::MIN {return Some(wanted);}
+    if !morphing || wanted==(0,0,0,0) || current==(0,0,0,0) || current.0==i32::MIN {return Some(wanted);}
     let covered=current.0<=wanted.0 && current.1<=wanted.1 && current.2>=wanted.2 && current.3>=wanted.3;
     if covered {return None;}
     Some((current.0.min(wanted.0),current.1.min(wanted.1),current.2.max(wanted.2),current.3.max(wanted.3)))

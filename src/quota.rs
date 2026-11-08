@@ -139,7 +139,7 @@ impl Config {
             if let Some(existing)=self.accounts.iter_mut().find(|a|a.provider==Provider::Claude&&a.slot.as_deref()==Some(&profile.slot)){
                 if claude::fetch(existing).is_err(){existing.source=path.clone();}continue;
             }
-            if let Some(existing)=self.accounts.iter_mut().find(|a|a.provider==Provider::Claude&&a.slot.is_none()&&claude::local_source(&a.source)==path){existing.source=path.clone();existing.slot=Some(profile.slot);continue;}
+            if let Some(existing)=self.accounts.iter_mut().find(|a|a.provider==Provider::Claude&&a.slot.as_deref().is_none_or(|slot|slot.starts_with("cli:"))&&claude::local_source(&a.source)==path){existing.source=path.clone();existing.slot=Some(profile.slot);continue;}
             let id=format!("ClaudeLocal-{}",profile.slot);let pinned=self.accounts.is_empty();if pinned{self.selected=id.clone();}
             let label=if alias.trim().is_empty(){profile.label}else{alias.trim().to_owned()};
             self.accounts.push(Account{id,provider:Provider::Claude,alias:label,source:path.clone(),slot:Some(profile.slot),enabled:true,pinned});added+=1;
@@ -272,9 +272,6 @@ impl Account {
     pub fn references_cli(&self)->bool {
         matches!(self.provider,Provider::Codex|Provider::Kimi)
             || self.provider==Provider::Claude && self.slot.as_deref().is_none_or(|slot|slot.starts_with("cli:"))
-    }
-    pub fn request_key(&self)->String {
-        json!([self.provider.name(),self.source,self.slot]).to_string()
     }
 }
 fn login_binding(auth:&Credential)->String {
@@ -474,7 +471,7 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     #[test] #[ignore="连接本机 ZCode 并只读核验套餐"]
     fn zcode_connect_local(){
         let mut config=Config::load();let path=zcode::path().unwrap();
-        zcode::add(&mut config,&path,"").unwrap();config.save();
+        zcode::add(&mut config,&path,"").unwrap();config.save().unwrap();
         let a=config.accounts.iter().find(|a|a.provider==Provider::ZCode).unwrap();
         match zcode::fetch(&http_agent(),a){Ok(s)=>println!("ZCode 返回 {} 个周期",s.windows.len()),Err(msg)=>println!("ZCode 查询状态：{msg}")}
     }

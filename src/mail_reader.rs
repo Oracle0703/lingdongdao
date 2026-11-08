@@ -56,7 +56,7 @@ impl App {
                 ui.label(egui::RichText::new("鼠标滚轮或拖动右侧滚动条查看全文").size(11.5).color(Color32::from_gray(160)));
                 ui.style_mut().spacing.scroll.floating=false;
                 egui::ScrollArea::vertical().id_salt(("mail-reader-body",&item.account,item.uid)).auto_shrink([false,false]).show(ui,|ui|{
-                    if crate::mail_digest::eligible(&raw) {
+                    if crate::mail_digest::eligible(&raw) && !self.mail.manage.reader_trash {
                         self.mail.digests.request(&raw,ui.ctx());
                         match self.mail.digests.get(&raw).cloned() {
                             Some(crate::mail_digest::Digest::Pending)=>{ui.label(egui::RichText::new("AI 摘要生成中…").size(14.0).color(Color32::from_gray(160)));},

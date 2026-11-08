@@ -132,7 +132,7 @@ impl App {
     /// 收起时岛上实际画出了系统监控圆环（歌词、极简、通知横幅都会占用岛体）。
     pub(crate) fn system_bar_visible(&self) -> bool {
         self.resident.target.x[crate::bar_layout::SYSTEM].is_some() && self.notice.is_none()
-            && !self.island_lyrics_active() && !self.effective_minimal()
+            && !self.island_lyrics_active() && !self.effective_minimal() && !self.side()
     }
 
     pub(crate) fn page_system(&mut self, c: &Card) {

@@ -371,16 +371,19 @@ fn query_system_metadata(artwork:&mut ArtworkCache,preferred:&str,available:&mut
     // 先比较全部会话；视频不能遮挡音乐，封面只为最终选中的会话读取。
     let previous=artwork.system.as_ref().map(|(media,_)|media.source.clone());
     let mut unreadable_previous=false;
+    let mut unreadable_preferred=false;
     let candidates:Vec<_>=sessions.iter().filter_map(|session|{
         let media=read_session(session,artwork);
         if media.is_none() && session.SourceAppUserModelId().ok().is_some_and(|id|previous.as_deref()==Some(id.to_string().as_str())){unreadable_previous=true;}
+        // [二开] 手动选定的播放器暂时读不出（切歌瞬间）时按读取失败处理，沿用 2 秒内的上一首，不闪空。
+        if media.is_none() && !preferred.is_empty() && session.SourceAppUserModelId().ok().is_some_and(|id|source_matches(preferred,&id.to_string())){unreadable_preferred=true;}
         media.map(|media|(session,media))
     }).collect();
     for (_,media) in &candidates {add_available(available,media);}
     let selected=candidates.iter().filter(|(_,media)|preferred.is_empty() || (source_matches(preferred,&media.source) && media.is_music()))
         .min_by_key(|(_,media)|media_rank(media));
     let Some((session,media))=selected else {
-        return if preferred.is_empty(){Err(())}else{Ok((None,None))};
+        return if preferred.is_empty() || unreadable_preferred {Err(())}else{Ok((None,None))};
     };
     // 当前播放器正在重载时，不把暂停中的另一客户端当成用户切换了播放源。
     if preferred.is_empty() && media_rank(media)>0 && unreadable_previous{return Err(());}

@@ -92,9 +92,13 @@ impl History {
     }
 
     fn load_from(path: std::path::PathBuf) -> Self {
-        let mut history = std::fs::read(&path).map(|raw| Self::from_json(&raw)).unwrap_or_default();
-        history.path = Some(path);
-        history
+        // [二开] 文件存在但读不出或格式不对时只在内存里记录、不写回，避免覆盖用户固定的条目。
+        match std::fs::read(&path) {
+            Ok(raw) if serde_json::from_slice::<Vec<serde_json::Value>>(&raw).is_err() => Self::default(),
+            Ok(raw) => Self { path: Some(path), ..Self::from_json(&raw) },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self { path: Some(path), ..Self::default() },
+            Err(_) => Self::default(),
+        }
     }
 
     fn changed(&mut self) {

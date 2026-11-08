@@ -452,7 +452,7 @@ impl App {
             }else{
                 let label=if is_focus{"开始"}else if is_power{"知道了"}else{"查看"};
                 if notice_button(&nc,257.0,12.0,60.0,label,"notice-action"){
-                    self.notice=None;if is_power{return;}if is_focus{self.pomo.running=true;}else if a.page<6{
+                    self.notice=None;if is_power{return;}if is_focus{self.pomo.running=true;}else if a.page<6 || a.page==crate::app::HOURGLASS_PAGE{
                         self.show_page(a.page);
                         if a.page==4 {
                             let order=self.todos.display_order(&self.today);
