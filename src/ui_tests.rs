@@ -28,8 +28,8 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
         crate::model::Settings::load().save().unwrap();
         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
         for line in legacy.lines(){
-            // 新增的工资页追加在末尾，且保持关闭；其他旧设置原样保留。
-            let line=match line {"visible_pages=10111111"=>"visible_pages=1011111101","page_order=5,2,0,1,3,4,6,7"=>"page_order=5,2,0,1,3,4,6,7,8,9",line=>line};
+            // 新增的工资页追加在末尾且保持关闭，截图页、沙漏页默认打开；其他旧设置原样保留。
+            let line=match line {"visible_pages=10111111"=>"visible_pages=10111111011","page_order=5,2,0,1,3,4,6,7"=>"page_order=5,2,0,1,3,4,6,7,8,9,10",line=>line};
             assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");
         }
     }
@@ -327,6 +327,8 @@ mod screenshot_capture_tests;
 mod screenshot_ui_tests;
 #[path = "island_polish_ui_tests.rs"]
 mod island_polish_tests;
+#[path = "hourglass_ui_tests.rs"]
+mod hourglass_tests;
 
 struct H {
     ctx: egui::Context,
@@ -1322,8 +1324,8 @@ fn wheel_navigation_reaches_every_page_in_both_directions(){
     h.app.shelf.items.clear();h.app.todos.items.clear();
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     h.hover(H::local(210.0,18.0),0.3);
-    // 默认可见：除工资页外的 9 页，截图页排在最后。
-    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,9,0]),(40.0,[9,7,6,5,4,3,2,1,0])] {
+    // 默认可见：除工资页外的 10 页，截图页、沙漏页排在最后。
+    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,9,10,0]),(40.0,[10,9,7,6,5,4,3,2,1,0])] {
         for page in pages {
             h.wheel(delta);
             assert_eq!(h.app.page,page,"滚轮翻页不能被空的置物架或待办卡住");
@@ -1363,10 +1365,12 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
 #[test]
 fn navigation_wraps_between_visible_pages_and_notification_settings_remain_accessible() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,crate::app::SCREENSHOT_PAGE);
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,crate::app::HOURGLASS_PAGE);
+    h.hover(H::local(300.0,60.0),0.8);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,crate::app::SCREENSHOT_PAGE);
     // 截图页不画翻页箭头（左右箭头用来切换截图）；用标题行滚轮或页码豆翻页。
     h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,68.0));assert_eq!(h.app.page,crate::app::SCREENSHOT_PAGE);
-    h.hover(H::local(210.0,18.0),0.3);h.wheel(-40.0);assert_eq!(h.app.page,0);
+    h.hover(H::local(210.0,18.0),0.3);h.wheel(-40.0);assert_eq!(h.app.page,crate::app::HOURGLASS_PAGE);
+    h.hover(H::local(210.0,18.0),0.25);h.wheel(-40.0);assert_eq!(h.app.page,0);
     h.app.open_settings_category(3);assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,6);
 }
 
@@ -1515,7 +1519,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true,true,true,true,true,true,true,true,false,true],"工资页默认关闭，截图页默认打开");
+    assert_eq!(h.app.settings.visible_pages,[true,true,true,true,true,true,true,true,false,true,true],"工资页默认关闭，截图页、沙漏页默认打开");
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -1523,23 +1527,23 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save().unwrap();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,false,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,false,true,true]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
     assert!(!restarted.settings.show_battery);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,false,true],"旧配置没有截图页时，新增的截图页默认打开");
+    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,false,true,true],"旧配置没有截图页、沙漏页时，新增的页面默认打开");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,false,true],"旧版页面开关应保留，并开启新增的日程页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,false,true,true],"旧版页面开关应保留，并开启新增的日程页");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=11111111\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false,true],"旧版配置升级后工资页保持关闭");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false,true,true],"旧版配置升级后工资页保持关闭");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000001\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,true,true]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,true,true,true]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=0000000010\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,true,false],"新版配置可以关闭截图页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,true,false,true],"新版配置可以关闭截图页");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false,true]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false,true,true]);
 }
 
 #[test]
@@ -1579,7 +1583,7 @@ fn battery_module_can_disable_only_the_power_warning() {
 fn page_visibility_skips_hidden_pages_in_every_navigation_control() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    for page in [1,3,4,6,7,crate::app::SCREENSHOT_PAGE] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,crate::app::SCREENSHOT_PAGE,crate::app::HOURGLASS_PAGE] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [2,5,0] {
         h.click(H::local(398.0,68.0));
@@ -1608,7 +1612,7 @@ fn page_visibility_moves_away_from_hidden_page_and_keeps_one_page() {
     h.app.set_page_visible(4,false);
     assert_eq!(h.app.page,0);
     assert!(!h.app.is_editing());
-    for page in [0,1,3,5,6,7,crate::app::SCREENSHOT_PAGE] {h.app.set_page_visible(page,false);}
+    for page in [0,1,3,5,6,7,crate::app::SCREENSHOT_PAGE,crate::app::HOURGLASS_PAGE] {h.app.set_page_visible(page,false);}
     assert_eq!(h.app.page,2);
     h.app.set_page_visible(2,false);
     assert!(h.app.settings.visible_pages[2],"不能关闭最后一个页面");
@@ -3603,13 +3607,13 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9];
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9,10];
     h.app.settings.save().unwrap();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8,9]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8,9,10]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
-    for page in [1,3,4,6,7,crate::app::SCREENSHOT_PAGE] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,crate::app::SCREENSHOT_PAGE,crate::app::HOURGLASS_PAGE] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [5,2,0] {
         h.click(H::local(398.0,68.0));
@@ -3622,12 +3626,12 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,5);
     for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","0,0,1,2,3,4,5,6,7","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8,9]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8,9,10]);
     }
     std::fs::write(crate::model::config_dir().join("settings.txt"),"page_order=5,2,0,1,3,4,6,7\n").unwrap();
-    assert_eq!(crate::model::Settings::load().page_order,[5,2,0,1,3,4,6,7,8,9],"旧版 8 页排序升级后工资页、截图页依次排在最后");
+    assert_eq!(crate::model::Settings::load().page_order,[5,2,0,1,3,4,6,7,8,9,10],"旧版 8 页排序升级后工资页、截图页、沙漏页依次排在最后");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"page_order=8,5,2,0,1,3,4,6,7\n").unwrap();
-    assert_eq!(crate::model::Settings::load().page_order,[8,5,2,0,1,3,4,6,7,9],"旧版 9 页排序升级后截图页排在最后");
+    assert_eq!(crate::model::Settings::load().page_order,[8,5,2,0,1,3,4,6,7,9,10],"旧版 9 页排序升级后截图页、沙漏页排在最后");
 }
 
 #[test]
@@ -3653,9 +3657,9 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8,9]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8,9,10]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8,9]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8,9,10]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }
 

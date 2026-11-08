@@ -118,6 +118,7 @@ fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
             crate::calendar_ui::source_icon(c,source,x-14.0,y-14.0,28.0);
         },
         "专注计时"=>crate::paint::stopwatch(&c.scaled(x,y,0.65),x,y,8.0,0.0,theme::RED_TOP),
+        "沙漏时间到"=>crate::hourglass::alert_icon(c,x,y),
         _=>crate::paint::bell(&c.scaled(x,y,1.7),x,y,theme::GRAY,0.0),
     }
 }
@@ -1098,6 +1099,12 @@ impl App {
                             setting_number(ui,"休息",&mut self.settings.rest_minutes,1,60," 分钟",1.0);
                             ui.add_space(3.0);
                             ui.small("调整后从下一阶段开始生效。");
+                        });
+                        settings_label(ui,"沙漏");
+                        settings_card(ui,|ui|{
+                            setting_number(ui,"一轮时长",&mut self.settings.hourglass_minutes,1,crate::hourglass::MINUTES_MAX," 分钟",1.0);
+                            ui.add_space(3.0);
+                            ui.small("岛上「沙漏」页也能直接选时长；正在流的沙漏从下一轮开始生效。");
                         });
                     }
                     3=>{

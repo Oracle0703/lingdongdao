@@ -37,6 +37,7 @@ mod bar_layout;
 mod resident_settings;
 mod avoidance;
 mod focus_bar;
+mod hourglass;
 mod salary;
 mod salary_ui;
 mod screenshot_ui;

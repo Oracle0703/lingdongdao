@@ -153,6 +153,8 @@ pub struct Settings {
     pub screenshot_dir: String,
     /// 截图快捷键预设的键名，取值见 `SCREENSHOT_HOTKEYS`。
     pub screenshot_hotkey: String,
+    /// 沙漏页一轮的时长（分钟）。
+    pub hourglass_minutes: u32,
     /// 用户拖动设定的收起宽度（逻辑点）；0 表示自动。普通药丸与歌词岛分别记住。
     pub pill_width: u16,
     pub lyric_width: u16,
@@ -172,7 +174,7 @@ pub const UI_SCALES: [u16; 6] = [100, 110, 120, 130, 140, 150];
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false,true], page_order: std::array::from_fn(|page| page), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, ui_scale: 100, screenshot_dir: String::new(), screenshot_hotkey: "alt_a".into(), pill_width: 0, lyric_width: 0 }
+        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false,true,true], page_order: std::array::from_fn(|page| page), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, ui_scale: 100, screenshot_dir: String::new(), screenshot_hotkey: "alt_a".into(), hourglass_minutes: 3, pill_width: 0, lyric_width: 0 }
     }
 }
 
@@ -236,6 +238,7 @@ impl Settings {
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
                 "hide_fullscreen" => s.hide_fullscreen = v != "0",
                 "focus_minutes" => s.focus_minutes = v.parse::<u32>().unwrap_or(25).clamp(1, 180),
+                "hourglass_minutes" => s.hourglass_minutes = v.parse::<u32>().unwrap_or(3).clamp(1, crate::hourglass::MINUTES_MAX),
                 "rest_minutes" | "short_minutes" => s.rest_minutes = v.parse::<u32>().unwrap_or(5).clamp(1, 60),
                 "water_minutes" => s.water_minutes = v.parse::<u32>().unwrap_or(45).clamp(5, 180),
                 "serving_ml" => s.serving_ml = v.parse::<u32>().unwrap_or(250).clamp(50, 1000),
@@ -291,6 +294,7 @@ impl Settings {
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
                 ("focus_minutes".into(), self.focus_minutes.to_string()),
+                ("hourglass_minutes".into(), self.hourglass_minutes.to_string()),
                 ("rest_minutes".into(), self.rest_minutes.to_string()),
                 ("water_minutes".into(), self.water_minutes.to_string()),
                 ("serving_ml".into(), self.serving_ml.to_string()),
