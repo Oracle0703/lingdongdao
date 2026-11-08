@@ -102,10 +102,117 @@ fn replace_file(tmp:&Path,path:&Path)->std::io::Result<()> {
     result
 }
 
+/// 岛体配色皮肤（与形状独立，可任意组合）。
+/// - 经典：纯黑；奶油：暖白底深棕字、橙色强调（参考 Oyen）；
+/// - 毛玻璃·浅 / 毛玻璃·深：系统实时模糊 + 浅色或深色玻璃。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Skin {
+    #[default]
+    Classic,
+    Cream,
+    GlassLight,
+    GlassDark,
+    Fluid,
+}
+
+impl Skin {
+    pub const ALL: [Skin; 5] = [Skin::Classic, Skin::Cream, Skin::GlassLight, Skin::GlassDark, Skin::Fluid];
+    pub fn key(self) -> &'static str {
+        match self { Self::Classic => "classic", Self::Fluid => "fluid", Self::Cream => "cream", Self::GlassLight => "glass_light", Self::GlassDark => "glass" }
+    }
+    pub fn parse(value: &str) -> Self {
+        match value { "fluid" => Self::Fluid, "cream" => Self::Cream, "glass_light" => Self::GlassLight, "glass" | "glass_dark" => Self::GlassDark, _ => Self::Classic }
+    }
+    pub fn label(self) -> &'static str {
+        match self { Self::Classic => "经典", Self::Fluid => "悬浮云", Self::Cream => "奶油", Self::GlassLight => "毛玻璃·浅", Self::GlassDark => "毛玻璃·深" }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Classic => "纯黑岛体，与屏幕刘海融为一体，资源占用最低。",
+            Self::Fluid => "半透明灰底随音乐封面换色，光晕跟随鼠标，播放进度带有渐隐光尾。皮肤作者：啵（@hanhb123）。",
+            Self::Cream => "暖白底色配深棕文字和橙色强调，柔和明亮。",
+            Self::GlassLight => "浅色磨砂玻璃，透出身后桌面的颜色，文字为深色；按背景明暗自动调整，保证清晰。",
+            Self::GlassDark => "深色磨砂玻璃，透出身后桌面的颜色，文字为白色；按背景明暗自动调整，保证清晰。",
+        }
+    }
+    pub fn is_glass(self) -> bool { matches!(self, Self::GlassLight | Self::GlassDark) }
+}
+
+/// 岛体形状：贴着屏幕顶边的刘海，或悬浮在顶边下方的胶囊。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IslandShape {
+    #[default]
+    Notch,
+    Pill,
+}
+
+impl IslandShape {
+    pub const ALL: [IslandShape; 2] = [IslandShape::Notch, IslandShape::Pill];
+    pub fn key(self) -> &'static str {
+        match self { Self::Notch => "notch", Self::Pill => "pill" }
+    }
+    pub fn parse(value: &str) -> Self {
+        match value { "pill" => Self::Pill, _ => Self::Notch }
+    }
+    pub fn label(self) -> &'static str {
+        match self { Self::Notch => "刘海", Self::Pill => "胶囊" }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Notch => "贴着屏幕顶边，顶部两侧向外柔和过渡，像屏幕刘海。",
+            Self::Pill => "悬浮在屏幕顶边下方，四角圆润，收起时是完整的胶囊。",
+        }
+    }
+}
+
+/// 岛体停靠的屏幕边缘：顶部为横向刘海 / 胶囊，左右两侧为竖向排列。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Dock {
+    #[default]
+    Top,
+    Left,
+    Right,
+}
+
+impl Dock {
+    pub const ALL: [Dock; 3] = [Dock::Top, Dock::Left, Dock::Right];
+    pub fn key(self) -> &'static str {
+        match self { Self::Top => "top", Self::Left => "left", Self::Right => "right" }
+    }
+    pub fn parse(value: &str) -> Self {
+        match value { "left" => Self::Left, "right" => Self::Right, _ => Self::Top }
+    }
+    pub fn label(self) -> &'static str {
+        match self { Self::Top => "顶部", Self::Left => "左侧", Self::Right => "右侧" }
+    }
+    pub fn is_side(self) -> bool { self != Self::Top }
+}
+
+/// 岛体大小（百分比）的范围与步进。
+pub const ISLAND_SIZE_MIN: u32 = 80;
+/// [二开] 上游为 140；拖动岛的边缘可以放大到 200%。
+pub const ISLAND_SIZE_MAX: u32 = 200;
+pub const ISLAND_SIZE_STEP: u32 = 5;
+/// 水平位置：-100 = 最左，0 = 居中，100 = 最右（按可移动范围的百分比）。
+pub const ISLAND_OFFSET_MAX: i32 = 100;
+
+pub fn island_size_value(value: u32) -> u32 {
+    let value = value.clamp(ISLAND_SIZE_MIN, ISLAND_SIZE_MAX);
+    (value + ISLAND_SIZE_STEP / 2) / ISLAND_SIZE_STEP * ISLAND_SIZE_STEP
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub load_error: Option<String>,
     pub display_id: String,
+    /// 岛体皮肤、毛玻璃是否使用系统模糊、大小百分比、水平位置。
+    pub skin: Skin,
+    pub island_shape: IslandShape,
+    pub glass_blur: bool,
+    pub island_size: u32,
+    pub island_offset: i32,
+    /// 停靠边缘；左右停靠时 `island_offset` 表示上下位置。
+    pub dock: Dock,
     pub settings_theme: crate::settings_theme::SettingsTheme,
     pub pet: bool,
     pub minimal: bool,
@@ -121,6 +228,10 @@ pub struct Settings {
     pub system_hud: bool,
     pub bluetooth_notifications: bool,
     pub read_notifications:bool,
+    pub wechat_notifications:bool,
+    /// 微信缩在托盘时，点提醒通过系统托盘按钮唤起微信（默认关闭）。
+    pub wechat_tray_open:bool,
+    pub qq_only:bool,
     pub notification_preview:bool,
     pub notifications: bool,
     pub sound: bool,
@@ -138,6 +249,7 @@ pub struct Settings {
     pub water_end: u32,
     /// v0.5.5 邮件提醒：总开关、验证码高亮、轮询间隔（秒）、会议提前量（分钟）。
     pub mail_enabled: bool,
+    pub mail_sync_operations:bool,
     pub mail_code: bool,
     pub mail_code_hide_seconds:u32,
     pub mail_interval: u32,
@@ -147,8 +259,6 @@ pub struct Settings {
     /// 用户点开设置或关掉后置 false，不再弹。
     pub calendar_prompt: bool,
     pub calendar_auto_sync: bool,
-    /// 岛的大小（百分比，取值见 `UI_SCALES`）：只放大岛，设置等窗口保持系统缩放。
-    pub ui_scale: u16,
     /// 截图保存目录（绝对路径）。空值：`E:\` 存在时用 `E:\截图`，否则截图时提示选择。
     pub screenshot_dir: String,
     /// 截图快捷键预设的键名，取值见 `SCREENSHOT_HOTKEYS`。
@@ -160,27 +270,35 @@ pub struct Settings {
     /// 用户拖动设定的收起宽度（逻辑点）；0 表示自动。普通药丸与歌词岛分别记住。
     pub pill_width: u16,
     pub lyric_width: u16,
+    /// 记录最近复制的文字（最近记录与固定条目均在本机保存）。
+    pub clipboard_history: bool,
 }
 
 /// 收起宽度的可调范围（逻辑点）。药丸的下限是它实际内容的宽度。
 pub const COLLAPSED_WIDTH_MAX: u16 = 600;
 pub const LYRIC_WIDTH_MIN: u16 = 260;
-/// 岛的大小（百分比）的可调范围；设置页的预设见 `UI_SCALES`，拖动可以设成范围内的任意值。
-pub const UI_SCALE_RANGE: std::ops::RangeInclusive<u16> = 80..=200;
 
 /// 截图快捷键预设：（设置中的键名，显示文字）。托盘按键名注册，见 `tray::ScreenshotHotkey`。
 pub const SCREENSHOT_HOTKEYS: [(&str, &str); 5] = [("alt_a", "Alt + A"), ("alt_s", "Alt + S"), ("ctrl_alt_a", "Ctrl + Alt + A"), ("f1", "F1"), ("off", "关闭")];
 
-/// 设置页可选的岛的大小；实际倍数还会受所在屏幕宽高限制，见 `display_layout::island_zoom`。
-pub const UI_SCALES: [u16; 6] = [100, 110, 120, 130, 140, 150];
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false,true,true,true], page_order: std::array::from_fn(|page| page), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, ui_scale: 100, screenshot_dir: String::new(), screenshot_hotkey: "alt_a".into(), system_island: true, hourglass_minutes: 3, pill_width: 0, lyric_width: 0 }
+        Self { load_error: None, display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false,true,true,true], page_order: std::array::from_fn(|page| page), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, screenshot_dir: String::new(), screenshot_hotkey: "alt_a".into(), system_island: true, hourglass_minutes: 3, pill_width: 0, lyric_width: 0, clipboard_history: true }
     }
 }
 
 impl Settings {
+    /// 主窗口（灵动岛）的界面缩放倍率。
+    pub fn island_scale(&self) -> f32 {
+        island_size_value(self.island_size) as f32 / 100.0
+    }
+
+    /// 水平位置，-1..=1。
+    pub fn island_offset_ratio(&self) -> f32 {
+        self.island_offset.clamp(-ISLAND_OFFSET_MAX, ISLAND_OFFSET_MAX) as f32 / ISLAND_OFFSET_MAX as f32
+    }
+
     pub fn clock_text(&self, clock: &str) -> String {
         use chrono::Timelike;
         let Ok(time) = chrono::NaiveTime::parse_from_str(clock.get(..5).unwrap_or(""), "%H:%M") else { return "--:--".into(); };
@@ -197,10 +315,21 @@ impl Settings {
     pub fn load() -> Self {
         let mut s = Self::default();
         let values=match read_kv_checked(&config_dir().join("settings.txt")){Ok(values)=>values,Err(error)=>{s.load_error=Some(error);return s;}};
+        let (mut legacy_ui_scale, mut island_size_seen) = (None, false);
         for (k, v) in values {
             match k.as_str() {
                 "settings_theme" => s.settings_theme=crate::settings_theme::SettingsTheme::parse(&v),
                 "display_id" => s.display_id = v,
+                "skin" => {
+                    // 早期测试版把胶囊当作皮肤保存。
+                    if v == "pill" { s.island_shape = IslandShape::Pill; }
+                    s.skin = Skin::parse(&v);
+                }
+                "island_shape" => s.island_shape = IslandShape::parse(&v),
+                "dock" => s.dock = Dock::parse(&v),
+                "glass_blur" => s.glass_blur = v != "0",
+                "island_size" => {s.island_size = island_size_value(v.parse::<u32>().unwrap_or(100)); island_size_seen = true;}
+                "island_offset" => s.island_offset = v.parse::<i32>().unwrap_or(0).clamp(-ISLAND_OFFSET_MAX, ISLAND_OFFSET_MAX),
                 "pet" => s.pet = v == "1" || v.eq_ignore_ascii_case("true"),
                 "minimal" => s.minimal = v == "1" || v.eq_ignore_ascii_case("true"),
                 "browser_minimal" => s.browser_minimal = v == "1",
@@ -230,6 +359,9 @@ impl Settings {
                     for enabled in s.visible_pages.iter_mut().take(8).skip(v.len()){*enabled=v.bytes().any(|b|b==b'1');}
                 }
                 "read_notifications" => s.read_notifications=v=="1",
+                "wechat_notifications" => s.wechat_notifications=v=="1",
+                "wechat_tray_open" => s.wechat_tray_open=v=="1",
+                "qq_only" => s.qq_only=v=="1",
                 "notification_preview" => s.notification_preview=v=="1",
                 "system_hud" => s.system_hud = v != "0",
                 "bluetooth_notifications" => s.bluetooth_notifications = v != "0",
@@ -248,6 +380,7 @@ impl Settings {
                 "water_start" => s.water_start = v.parse::<u32>().unwrap_or(9).min(23),
                 "water_end" => s.water_end = v.parse::<u32>().unwrap_or(22).min(24),
                 "mail_enabled" => s.mail_enabled = v != "0",
+                "mail_sync_operations" => s.mail_sync_operations=v=="1",
                 "mail_code" => s.mail_code = v != "0",
                 "mail_code_hide_seconds" => s.mail_code_hide_seconds=v.parse::<u32>().unwrap_or(60).clamp(15,300),
                 "mail_interval" => s.mail_interval = match v.parse::<u32>().unwrap_or(120) { 60 => 60, 300 => 300, _ => 120 },
@@ -255,15 +388,18 @@ impl Settings {
                 "mail_ics" => s.mail_ics = match v.parse::<u32>().unwrap_or(15) { 5 => 5, 30 => 30, _ => 15 },
                 "calendar_prompt" => s.calendar_prompt = v != "0",
                 "calendar_auto_sync" => s.calendar_auto_sync = v != "0",
-                "ui_scale" => s.ui_scale = v.parse::<u16>().ok().filter(|v|UI_SCALE_RANGE.contains(v)).unwrap_or(100),
+                // [二开] 旧版本自己的「岛的大小」(ui_scale)：没有上游的 island_size 时迁移过来。
+                "ui_scale" => legacy_ui_scale = v.parse::<u32>().ok(),
                 "pill_width" => s.pill_width = v.parse::<u16>().ok().filter(|v|*v<=COLLAPSED_WIDTH_MAX).unwrap_or(0),
                 "lyric_width" => s.lyric_width = v.parse::<u16>().ok().filter(|v|*v==0 || (LYRIC_WIDTH_MIN..=COLLAPSED_WIDTH_MAX).contains(v)).unwrap_or(0),
                 "screenshot_dir" => s.screenshot_dir = v.trim().to_string(),
                 "screenshot_hotkey" if SCREENSHOT_HOTKEYS.iter().any(|(key,_)|*key==v) => s.screenshot_hotkey = v,
+                "clipboard_history" => s.clipboard_history = v != "0",
                 _ => {}
             }
         }
         if !s.visible_pages.contains(&true) { s.visible_pages[0]=true; }
+        if let Some(percent) = legacy_ui_scale.filter(|_| !island_size_seen) { s.island_size = island_size_value(percent); }
         s
     }
 
@@ -273,6 +409,12 @@ impl Settings {
             &config_dir().join("settings.txt"),
             &[
                 ("display_id".into(),self.display_id.clone()),
+                ("skin".into(),self.skin.key().into()),
+                ("island_shape".into(),self.island_shape.key().into()),
+                ("dock".into(),self.dock.key().into()),
+                ("glass_blur".into(),(self.glass_blur as u8).to_string()),
+                ("island_size".into(),island_size_value(self.island_size).to_string()),
+                ("island_offset".into(),self.island_offset.clamp(-ISLAND_OFFSET_MAX,ISLAND_OFFSET_MAX).to_string()),
                 ("settings_theme".into(),self.settings_theme.key().into()),
                 ("pet".into(), if self.pet { "1".to_string() } else { "0".to_string() }),
                 ("minimal".into(), if self.minimal { "1".to_string() } else { "0".to_string() }),
@@ -286,6 +428,9 @@ impl Settings {
                 ("clock_12h".into(), (self.clock_12h as u8).to_string()),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
                 ("read_notifications".into(),(self.read_notifications as u8).to_string()),
+                ("wechat_notifications".into(),(self.wechat_notifications as u8).to_string()),
+                ("wechat_tray_open".into(),(self.wechat_tray_open as u8).to_string()),
+                ("qq_only".into(),(self.qq_only as u8).to_string()),
                 ("notification_preview".into(),(self.notification_preview as u8).to_string()),
                 ("system_hud".into(), (self.system_hud as u8).to_string()),
                 ("bluetooth_notifications".into(), (self.bluetooth_notifications as u8).to_string()),
@@ -305,6 +450,7 @@ impl Settings {
                 ("water_start".into(), self.water_start.to_string()),
                 ("water_end".into(), self.water_end.to_string()),
                 ("mail_enabled".into(), (self.mail_enabled as u8).to_string()),
+                ("mail_sync_operations".into(),(self.mail_sync_operations as u8).to_string()),
                 ("mail_code".into(), (self.mail_code as u8).to_string()),
                 ("mail_code_hide_seconds".into(), self.mail_code_hide_seconds.to_string()),
                 ("mail_interval".into(), self.mail_interval.to_string()),
@@ -312,22 +458,108 @@ impl Settings {
                 ("ignored_mail_events".into(), serde_json::to_string(&self.ignored_mail_events).unwrap()),
                 ("calendar_prompt".into(), (self.calendar_prompt as u8).to_string()),
                 ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
-                ("ui_scale".into(), self.ui_scale.to_string()),
                 ("screenshot_dir".into(), self.screenshot_dir.clone()),
                 ("screenshot_hotkey".into(), self.screenshot_hotkey.clone()),
                 ("pill_width".into(), self.pill_width.to_string()),
                 ("lyric_width".into(), self.lyric_width.to_string()),
+                ("clipboard_history".into(), (self.clipboard_history as u8).to_string()),
             ],
         )
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TodoItem {
     pub text: String,
-    pub done_on: Option<String>, // YYYY-MM-DD
-    pub due: Option<String>, // 本地日期与时间：YYYY-MM-DD HH:MM
+    /// 一次性待办：完成日期；每周重复：最近一次完成的日期（只算当天）。YYYY-MM-DD
+    pub done_on: Option<String>,
+    /// 本地日期与时间：YYYY-MM-DD HH:MM；每周重复只用其中的时间。
+    pub due: Option<String>,
     pub reminded: bool,
+    /// 每周重复：bit0 = 周一 … bit6 = 周日；0 = 不重复（一次性待办）。
+    pub repeat: u8,
+    /// 每周重复：当天已提醒的日期，第二天自动重新提醒。
+    pub reminded_on: Option<String>,
+}
+
+pub const WEEKDAY_NAMES: [&str; 7] = ["一", "二", "三", "四", "五", "六", "日"];
+pub const REPEAT_ALL: u8 = 0b111_1111;
+pub const REPEAT_WORKDAYS: u8 = 0b001_1111;
+pub const REPEAT_WEEKEND: u8 = 0b110_0000;
+
+fn weekday_bit(date: &str) -> Option<u8> {
+    use chrono::Datelike;
+    let day = chrono::NaiveDate::parse_from_str(date.get(..10)?, "%Y-%m-%d").ok()?;
+    Some(1 << day.weekday().num_days_from_monday())
+}
+
+/// 「每天」「工作日」「周末」「每周一、三、五」。
+pub fn repeat_label(mask: u8) -> String {
+    match mask & REPEAT_ALL {
+        0 => "不重复".into(),
+        REPEAT_ALL => "每天".into(),
+        REPEAT_WORKDAYS => "工作日".into(),
+        REPEAT_WEEKEND => "周末".into(),
+        mask => {
+            let days: Vec<&str> = (0..7).filter(|i| mask & (1 << i) != 0).map(|i| WEEKDAY_NAMES[i]).collect();
+            format!("每周{}", days.join("、"))
+        }
+    }
+}
+
+/// 列表里的短标签：「每天」「工作日」「周末」「周一三五」。
+pub fn repeat_tag(mask: u8) -> String {
+    match mask & REPEAT_ALL {
+        0 => String::new(),
+        REPEAT_ALL => "每天".into(),
+        REPEAT_WORKDAYS => "工作日".into(),
+        REPEAT_WEEKEND => "周末".into(),
+        mask => format!("周{}", (0..7).filter(|i| mask & (1 << i) != 0).map(|i| WEEKDAY_NAMES[i]).collect::<String>()),
+    }
+}
+
+impl TodoItem {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into(), ..Self::default() }
+    }
+
+    pub fn is_repeating(&self) -> bool { self.repeat & REPEAT_ALL != 0 }
+
+    /// 这一天是否要做：一次性待办每天都显示；重复待办只在选中的星期几显示。
+    pub fn scheduled_on(&self, today: &str) -> bool {
+        !self.is_repeating() || weekday_bit(today).is_some_and(|bit| self.repeat & bit != 0)
+    }
+
+    /// 今天是否已完成：重复待办第二天自动变回未完成。
+    pub fn done_for(&self, today: &str) -> bool {
+        if self.is_repeating() { self.done_on.as_deref() == Some(today) } else { self.done_on.is_some() }
+    }
+
+    /// 勾选 / 取消勾选。
+    pub fn toggle(&mut self, today: &str) {
+        self.done_on = if self.done_for(today) { None } else { Some(today.to_string()) };
+    }
+
+    /// `now` 为 `YYYY-MM-DD HH:MM`。一次性待办按完整时间提醒一次；
+    /// 重复待办在每个选中的日子到点提醒一次。
+    pub fn reminder_due(&self, now: &str) -> bool {
+        let Some(due) = self.due.as_deref() else { return false; };
+        let today = now.get(..10).unwrap_or("");
+        if self.done_for(today) { return false; }
+        if !self.is_repeating() { return !self.reminded && due <= now; }
+        let (Some(at), Some(clock)) = (due.get(11..16), now.get(11..16)) else { return false; };
+        self.scheduled_on(today) && self.reminded_on.as_deref() != Some(today) && at <= clock
+    }
+
+    pub fn mark_reminded(&mut self, now: &str) {
+        if self.is_repeating() { self.reminded_on = now.get(..10).map(str::to_string); } else { self.reminded = true; }
+    }
+
+    /// 悬停提示里的提醒说明。
+    pub fn reminder_text(&self) -> Option<String> {
+        let due = self.due.as_deref()?;
+        Some(if self.is_repeating() { format!("{} {}", repeat_label(self.repeat), due.get(11..16).unwrap_or(due)) } else { due.to_string() })
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -338,53 +570,65 @@ pub struct TodoList {
 
 impl TodoList {
     pub fn load() -> Self {
-        let path = config_dir().join("todo.txt");
+        // [二开] 读取失败（而不是文件不存在）时记下错误，禁止随后用空列表覆盖。
+        match read_optional(&config_dir().join("todo.txt")) {
+            Ok(Some(text)) => Self::parse(&text),
+            Ok(None) => Self::default(),
+            Err(error) => Self { load_error: Some(error), ..Self::default() },
+        }
+    }
+
+    pub fn parse(text: &str) -> Self {
         let mut list = Self::default();
-        let loaded=match read_optional(&path){Ok(loaded)=>loaded,Err(error)=>{list.load_error=Some(error);return list;}};
-        if let Some(text) = loaded {
-            let text=text.trim_start_matches('\u{feff}');
-            if text.trim_start().starts_with(['{','[']) {
-                match Self::parse_json(text) {
-                    Ok(items)=>list.items=items,
-                    Err(error)=>list.load_error=Some(format!("待办文件无法完整读取：{error}")),
-                }
-                return list;
+        let text=text.trim_start_matches('\u{feff}');
+        // [二开] 待办保存为带版本号的 JSON；旧的文本格式（含上游的每周重复标记）仍可读取。
+        if text.trim_start().starts_with(['{','[']) {
+            match Self::parse_json(text) {
+                Ok(items)=>list.items=items,
+                Err(error)=>list.load_error=Some(format!("待办文件无法完整读取：{error}")),
             }
+            return list;
+        }
+        {
             for line in text.lines() {
                 if line.trim().is_empty() {
                     continue;
                 }
                 // 格式：<x 或 o>|<完成日期或 ->|正文；也接受纯文本行（视为未完成）
                 if !line.contains('|') {
-                    list.items.push(TodoItem { text: line.trim().to_string(), done_on: None, due: None, reminded: false });
+                    list.items.push(TodoItem::new(line.trim()));
                     continue;
                 }
+                // 每周重复的标记写成 `r<星期位>`（旧版本读到会当作未完成的普通待办）。
                 let mut parts = line.splitn(3, '|');
                 let flag = parts.next().unwrap_or("o");
                 let when = parts.next().unwrap_or("-");
-                if !matches!(flag, "o" | "x") || (when != "-" && chrono::NaiveDate::parse_from_str(when, "%Y-%m-%d").is_err()) {
-                    list.items.push(TodoItem { text: line.to_owned(), done_on: None, due: None, reminded: false });
+                let weekly = flag.strip_prefix('r').is_some_and(|bits| bits.parse::<u8>().is_ok());
+                if !(matches!(flag, "o" | "x") || weekly) || (when != "-" && chrono::NaiveDate::parse_from_str(when, "%Y-%m-%d").is_err()) {
+                    list.items.push(TodoItem { text: line.to_owned(), ..TodoItem::new("") });
                     continue;
                 }
                 let raw = parts.next().unwrap_or("").trim();
+                let repeat = flag.strip_prefix('r').and_then(|bits| bits.parse::<u8>().ok()).unwrap_or(0) & REPEAT_ALL;
                 let legacy_due = raw.strip_prefix("@due:").and_then(|rest| {
                     let mut fields = rest.splitn(3, '|');
                     let due = fields.next()?;
                     chrono::NaiveDateTime::parse_from_str(due, "%Y-%m-%d %H:%M").ok()?;
-                    let reminded = match fields.next()? { "0" => false, "1" => true, _ => return None };
-                    Some((Some(due.to_owned()), reminded, fields.next()?.to_owned()))
+                    // 一次性待办：0 / 1；每周重复：当天已提醒的日期，或 0。
+                    let reminded = fields.next()?;
+                    if !(matches!(reminded, "0" | "1") || chrono::NaiveDate::parse_from_str(reminded, "%Y-%m-%d").is_ok()) { return None; }
+                    Some((Some(due.to_owned()), reminded.to_owned(), fields.next()?.to_owned()))
                 });
-                let (due, reminded, text) = legacy_due.unwrap_or_else(|| (None, false, raw.to_string()));
+                let (due, reminded_field, text) = legacy_due.unwrap_or_else(|| (None, "0".to_string(), raw.to_string()));
                 if text.is_empty() {
                     continue;
                 }
+                let done = (flag == "x" || repeat != 0) && when != "-";
                 list.items.push(TodoItem {
-                    text, due, reminded,
-                    done_on: if flag == "x" && when != "-" {
-                        Some(when.to_string())
-                    } else {
-                        None
-                    },
+                    text, due, repeat,
+                    reminded: repeat == 0 && reminded_field == "1",
+                    reminded_on: (repeat != 0 && reminded_field.len() == 10).then_some(reminded_field),
+                    done_on: done.then(|| when.to_string()),
                 });
             }
         }
@@ -398,24 +642,38 @@ impl TodoList {
         let optional_string=|item:&serde_json::Value,key:&str|->Result<Option<String>,String>{
             match item.get(key) {Some(serde_json::Value::Null)=>Ok(None),Some(serde_json::Value::String(value))=>Ok(Some(value.clone())),_=>Err(format!("待办 {key} 字段无效"))}
         };
+        // 上游新增的每周重复字段：旧文件没有时按不重复处理。
+        let repeat=|item:&serde_json::Value|->Result<u8,String>{
+            match item.get("repeat") {None|Some(serde_json::Value::Null)=>Ok(0),Some(value)=>value.as_u64().filter(|v|*v<=u64::from(REPEAT_ALL)).map(|v|v as u8).ok_or_else(||"待办 repeat 字段无效".to_string())}
+        };
+        let reminded_on=|item:&serde_json::Value|->Result<Option<String>,String>{
+            if item.get("reminded_on").is_none() {Ok(None)} else {optional_string(item,"reminded_on")}
+        };
         items.iter().map(|item|Ok(TodoItem {
             text:item["text"].as_str().ok_or("待办 text 字段无效")?.to_owned(),
             done_on:optional_string(item,"done_on")?,due:optional_string(item,"due")?,
             reminded:item["reminded"].as_bool().ok_or("待办 reminded 字段无效")?,
+            repeat:repeat(item)?,reminded_on:reminded_on(item)?,
         })).collect()
     }
 
     pub fn save(&self) -> std::io::Result<()> {
         ensure_loaded(&self.load_error)?;
-        let items: Vec<_> = self.items.iter().map(|item| serde_json::json!({
-            "text": item.text, "done_on": item.done_on, "due": item.due, "reminded": item.reminded
-        })).collect();
-        let body = serde_json::to_vec(&serde_json::json!({"version": 1, "items": items}))?;
+        let body = self.serialize();
         let path = config_dir().join("todo.txt");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        atomic_write(&path, &body)
+        atomic_write(&path, body.as_bytes())
+    }
+
+    /// 保存内容（版本 1 的 JSON；每周重复字段为可选的追加字段）。
+    pub fn serialize(&self) -> String {
+        let items: Vec<_> = self.items.iter().map(|item| serde_json::json!({
+            "text": item.text, "done_on": item.done_on, "due": item.due, "reminded": item.reminded,
+            "repeat": item.repeat & REPEAT_ALL, "reminded_on": item.reminded_on,
+        })).collect();
+        serde_json::json!({"version": 1, "items": items}).to_string()
     }
 
     pub fn done_today(&self, today: &str) -> usize {
@@ -423,6 +681,21 @@ impl TodoList {
             .iter()
             .filter(|i| i.done_on.as_deref() == Some(today))
             .count()
+    }
+
+    /// 今天要做的待办（不在今天的重复待办除外）中，(已完成, 总数)。
+    pub fn progress(&self, today: &str) -> (usize, usize) {
+        let scheduled = self.items.iter().filter(|i| i.scheduled_on(today));
+        let (mut done, mut total) = (0, 0);
+        for item in scheduled { total += 1; if item.done_for(today) { done += 1; } }
+        (done, total)
+    }
+
+    /// 今天未完成在前，其他日期的未完成其次，已完成沉底；原始存储顺序不变。
+    pub fn display_order(&self, today: &str) -> Vec<usize> {
+        let mut order:Vec<_>=(0..self.items.len()).collect();
+        order.sort_by_key(|&i|{let item=&self.items[i];(item.done_for(today),!item.scheduled_on(today))});
+        order
     }
 }
 
@@ -607,6 +880,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn island_appearance_values_are_normalized() {
+        assert_eq!(island_size_value(100), 100);
+        assert_eq!(island_size_value(10), ISLAND_SIZE_MIN);
+        assert_eq!(island_size_value(999), ISLAND_SIZE_MAX);
+        assert_eq!(island_size_value(113), 115);
+        assert_eq!(island_size_value(112), 110);
+        for skin in Skin::ALL { assert_eq!(Skin::parse(skin.key()), skin); }
+        assert_eq!(Skin::parse("unknown"), Skin::Classic);
+        assert_eq!(Skin::parse("glass"), Skin::GlassDark, "旧版本保存的毛玻璃即深色毛玻璃");
+        for shape in IslandShape::ALL { assert_eq!(IslandShape::parse(shape.key()), shape); }
+        assert_eq!(Settings::default().island_shape, IslandShape::Notch);
+        let mut s = Settings::default();
+        assert_eq!((s.skin, s.glass_blur, s.island_scale(), s.island_offset_ratio()), (Skin::Classic, true, 1.0, 0.0));
+        s.island_size = 125; s.island_offset = -250;
+        assert_eq!((s.island_scale(), s.island_offset_ratio()), (1.25, -1.0));
+    }
+
+    #[test]
     fn quality_save_preserves_neighbor_and_cleans_failed_writes() {
         let dir=std::env::temp_dir().join(format!("daozai-quality-save-{}",std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -645,6 +936,36 @@ mod tests {
         for worker in workers{worker.join().unwrap().unwrap();}
         let content=fs::read(&path).unwrap();assert_eq!(content.len(),128*1024);assert!(content.iter().all(|b|*b==content[0]));
         assert_eq!(fs::read_dir(&dir).unwrap().count(),1);fs::remove_file(path).unwrap();fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn weekly_todos_round_trip_and_reset_each_day() {
+        // 2026-11-02 是周一。
+        let mut weekly = TodoItem::new("周会 | 准备材料");
+        weekly.repeat = 0b000_0101; // 周一、周三
+        weekly.due = Some("2026-11-02 09:30".into());
+        weekly.toggle("2026-11-02");
+        weekly.reminded_on = Some("2026-11-02".into());
+        let once = TodoItem { done_on: Some("2026-11-01".into()), reminded: true, due: Some("2026-11-01 08:00".into()), ..TodoItem::new("一次性") };
+        let list = TodoList { items: vec![weekly.clone(), once.clone()], ..Default::default() };
+        let loaded = TodoList::parse(&list.serialize());
+        assert_eq!(loaded.items.len(), 2);
+        let w = &loaded.items[0];
+        assert_eq!((w.text.as_str(), w.repeat, w.done_on.as_deref(), w.reminded_on.as_deref()), ("周会 | 准备材料", 0b101, Some("2026-11-02"), Some("2026-11-02")));
+        assert!(w.done_for("2026-11-02") && !w.done_for("2026-11-04"), "重复待办第二天自动变回未完成");
+        assert!(w.scheduled_on("2026-11-04") && !w.scheduled_on("2026-11-03"));
+        assert!(!w.reminder_due("2026-11-02 10:00"), "当天已提醒");
+        assert!(!w.reminder_due("2026-11-04 09:00") && w.reminder_due("2026-11-04 09:30"));
+        assert!(!w.reminder_due("2026-11-03 10:00"), "不在选中的星期几不提醒");
+        let o = &loaded.items[1];
+        assert_eq!((o.repeat, o.reminded, o.done_on.as_deref()), (0, true, Some("2026-11-01")));
+        assert!(o.done_for("2026-11-09") && o.scheduled_on("2026-11-03"));
+        assert_eq!(loaded.progress("2026-11-03"), (1, 1));
+        assert_eq!(loaded.progress("2026-11-04"), (1, 2));
+        assert_eq!(loaded.display_order("2026-11-03"), vec![0, 1],"已完成事项应排在其他日期的未完成事项后面");
+        assert_eq!(repeat_label(REPEAT_WORKDAYS), "工作日");
+        assert_eq!(repeat_label(0b101_0101), "每周一、三、五、日");
+        assert_eq!(repeat_tag(0b001_0101), "周一三五");
     }
 
     #[test]

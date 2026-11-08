@@ -109,13 +109,14 @@ fn dragging_the_expanded_edge_scales_the_island_and_keeps_it_open() {
     // 拖到岛外也保持展开
     drag(&mut h, edge, edge + Vec2::new(60.0, 0.0));
     assert!(h.app.open, "拖动中和刚松开时不收起");
-    let scale = crate::model::Settings::load().ui_scale;
+    // 岛体大小采用上游的设置项（island_size，5% 一档）。
+    let scale = crate::model::Settings::load().island_size;
     assert!((125..=130).contains(&scale), "向外拖 60 点约放大 29%：{scale}");
-    assert_eq!(scale, h.app.settings.ui_scale);
+    assert_eq!(scale, h.app.settings.island_size);
     // 下限 80%
     let edge = H::local(PW - 3.0, 80.0);
     drag(&mut h, edge, edge - Vec2::new(300.0, 0.0));
-    assert_eq!(crate::model::Settings::load().ui_scale, 80);
+    assert_eq!(crate::model::Settings::load().island_size, 80);
 }
 
 #[test]

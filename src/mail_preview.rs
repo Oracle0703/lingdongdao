@@ -78,7 +78,8 @@ impl App {
         if close.clicked() {self.end_mail_preview(true);}
         else if read.clicked() {
             self.show_page(5);
-            self.mail.open_uid=Some((item.account,item.uid));
+            self.mail.manage.trash_open=false;
+            self.mail_open(&item);
         }
         true
     }

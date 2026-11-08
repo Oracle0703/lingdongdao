@@ -162,7 +162,7 @@ impl State {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("岛仔有新版本了").font(theme::font(21.0,W::Semibold)));
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(env!("CARGO_PKG_VERSION")).color(theme::DIM));
+                                    ui.label(egui::RichText::new(option_env!("DAOZAI_BUILD_LABEL").unwrap_or(env!("CARGO_PKG_VERSION"))).color(theme::DIM));
                                     ui.label(egui::RichText::new("→").color(theme::DIM));
                                     egui::Frame::new().fill(theme::alpha_blue(0.12)).corner_radius(6.0)
                                         .inner_margin(egui::Margin::symmetric(8,3)).show(ui, |ui| {
@@ -232,6 +232,33 @@ impl State {
 }
 
 // Windows 的 GL 透明窗口可能仍显示黑底，按绘制轮廓裁掉窗口外沿。
+/// 只统计岛仔自己的文件（KB）。共享安装文件夹里的其他软件不算在内。
+fn own_files_kb(dir: &std::path::Path) -> u32 {
+    let bytes: u64 = ["daozai.exe", "Uninstall.exe", "LICENSE", "THIRD_PARTY_NOTICES.txt"].iter()
+        .filter_map(|name| std::fs::metadata(dir.join(name)).ok()).filter(|meta| meta.is_file()).map(|meta| meta.len()).sum();
+    bytes.div_ceil(1024).min(u64::from(u32::MAX)) as u32
+}
+
+/// 启动时为安装版登记真实大小：旧版安装器没有写 `EstimatedSize`，
+/// 软件管家会统计整个安装文件夹；装进共享文件夹时会显示几十 GB。只在登记的安装位置就是本程序所在目录时写入。
+#[cfg(windows)]
+pub fn record_install_size() {
+    use windows::{core::w, Win32::System::Registry::{RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, RRF_RT_REG_SZ}};
+    // [二开] 本仓库安装项按系统标识登记（见 brand.rs 与 installer/setup.nsi 的 UNINSTALL_KEY）。
+    let key = windows::core::HSTRING::from(format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}", crate::brand::APP_ID));
+    let key = &key;
+    let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(PathBuf::from)) else { return };
+    let mut buffer = [0u16; 1024];
+    let mut size = (buffer.len() * 2) as u32;
+    if unsafe { RegGetValueW(HKEY_CURRENT_USER, key, w!("InstallLocation"), RRF_RT_REG_SZ, None, Some(buffer.as_mut_ptr().cast()), Some(&mut size)) }.is_err() { return; }
+    let location = String::from_utf16_lossy(&buffer[..buffer.iter().position(|c| *c == 0).unwrap_or(0)]);
+    let same = |a: &std::path::Path, b: &std::path::Path| a.canonicalize().ok().zip(b.canonicalize().ok()).is_some_and(|(a, b)| a == b);
+    if location.trim().is_empty() || !same(std::path::Path::new(location.trim()), &dir) { return; }
+    let kb = own_files_kb(&dir);
+    if kb == 0 { return; }
+    let _ = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, key, w!("EstimatedSize"), REG_DWORD.0, Some((&kb as *const u32).cast()), 4) };
+}
+
 #[cfg(windows)]
 fn clip_update_window(rect: egui::Rect, scale: f32) {
     use windows::Win32::{Foundation::{BOOL, HWND, LPARAM}, Graphics::Gdi::*,
@@ -390,6 +417,21 @@ fn parse_release(value: &serde_json::Value, current: &str) -> Result<Option<Stri
     let latest = version(tag).ok_or_else(invalid)?;
     let current = version(current).ok_or_else(invalid)?;
     Ok((latest > current).then(|| tag.to_owned()))
+}
+
+#[cfg(test)]
+mod install_size_tests {
+    #[test]
+    fn install_size_counts_only_daozai_files() {
+        let dir = std::env::temp_dir().join(format!("daozai-size-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Other App")).unwrap();
+        std::fs::write(dir.join("daozai.exe"), vec![0u8; 3000]).unwrap();
+        std::fs::write(dir.join("LICENSE"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("Other App").join("big.bin"), vec![0u8; 5 * 1024 * 1024]).unwrap();
+        std::fs::write(dir.join("other.exe"), vec![0u8; 2 * 1024 * 1024]).unwrap();
+        assert_eq!(super::own_files_kb(&dir), 4, "共享文件夹里其他软件的文件不计入");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

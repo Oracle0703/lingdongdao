@@ -55,6 +55,7 @@ function Assert-Installed {
     if ($entry.InstallLocation -ne $installed -or $entry.DisplayVersion -ne '9.8.7') { throw '安装注册信息不正确' }
     if ($entry.DisplayName -ne $shortcutName) { throw '系统显示名称没有隔离产品标识' }
     if ($entry.UninstallString -ne ('"' + (Join-Path $installed 'Uninstall.exe') + '"')) { throw '卸载命令不正确' }
+    if (-not ($entry.EstimatedSize -gt 0 -and $entry.EstimatedSize -lt 100000)) { throw "登记大小不正确：$($entry.EstimatedSize) KB" }
     if ((Get-FileHash (Join-Path $installed 'daozai.exe')).Hash -ne (Get-FileHash $fixture).Hash) { throw '程序复制不正确' }
     $shell = New-Object -ComObject WScript.Shell
     $desktopLink = Join-Path $shell.SpecialFolders.Item('Desktop') "$shortcutName.lnk"
@@ -131,12 +132,31 @@ try {
     Assert-OriginalEntries
     Write-Output '通过：原生卸载、保留用户数据和额外文件'
     Write-Output '通过：安装、升级、迁移和卸载均未改变同名原版入口'
+    # 选了装着其他软件的共享文件夹：自动装进其中的专用子文件夹，登记大小只算岛仔自己的文件。
+    $shared = Join-Path $root 'shared apps'
+    New-Item -ItemType Directory -Path (Join-Path $shared 'Other App') -Force | Out-Null
+    [IO.File]::WriteAllBytes((Join-Path $shared 'Other App\big.bin'), (New-Object byte[] (40MB)))
+    Set-Content -LiteralPath (Join-Path $shared 'other.txt') -Value 'other-software'
+    $installed = Join-Path $shared $id
+    $process = Start-Process -FilePath $setup -ArgumentList @('/S',"/D=$shared") -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(30000) -or $process.ExitCode -ne 0) { throw '共享文件夹安装失败或超时' }
+    Assert-Installed
+    if (Test-Path -LiteralPath (Join-Path $shared 'daozai.exe')) { throw '程序被直接装进了共享文件夹' }
+    if ((Get-ItemProperty -LiteralPath $key).EstimatedSize -ge 40000) { throw '登记大小把共享文件夹里的其他软件算了进去' }
+    Write-Output '通过：共享文件夹自动建立专用子文件夹、登记大小只算岛仔'
+    Run-Setup -UseRegisteredPath
+    Assert-Installed
+    Write-Output '通过：专用子文件夹原地升级'
+    $process = Start-Process -FilePath (Join-Path $installed 'Uninstall.exe') -ArgumentList @('/S',"_?=$installed") -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(30000) -or $process.ExitCode -ne 0) { throw '共享文件夹卸载失败或超时' }
+    if (-not (Test-Path -LiteralPath (Join-Path $shared 'other.txt')) -or -not (Test-Path -LiteralPath (Join-Path $shared 'Other App\big.bin'))) { throw '卸载误删共享文件夹里的其他软件' }
+    Write-Output '通过：卸载不影响共享文件夹里的其他软件'
 } finally {
     # 清理本测试的独立安装，避免失败时残留桌面快捷方式和自启项。
     if (Test-Path -LiteralPath $key) {
         $cleanupDirectory = (Get-ItemProperty -LiteralPath $key).InstallLocation
         $defaultDirectory = Join-Path $env:LOCALAPPDATA "Programs\$id"
-        if ($cleanupDirectory -notin @($oldInstalled,$newInstalled,$defaultDirectory)) { throw '测试清理目录超出预期范围' }
+        if ($cleanupDirectory -notin @($oldInstalled,$newInstalled,$defaultDirectory,(Join-Path $root "shared apps\$id"))) { throw '测试清理目录超出预期范围' }
         $cleanup = Start-Process -FilePath (Join-Path $cleanupDirectory 'Uninstall.exe') -ArgumentList @('/S',"_?=$cleanupDirectory") -WindowStyle Hidden -PassThru
         $null = $cleanup.WaitForExit(30000)
     }

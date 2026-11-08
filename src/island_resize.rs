@@ -1,7 +1,8 @@
 //! 拖动岛的左右边缘调整大小，松开后记住，下次打开保持一致。
 //!
 //! - 收起时：改宽度。普通药丸和歌词岛分别记住；药丸不能窄于它实际的内容，歌词岛不小于 `LYRIC_WIDTH_MIN`。
-//! - 展开时：整体缩放（即设置里的「岛的大小」）。各页面按固定版式绘制，只改宽度会让内容错位，所以按比例放大缩小。
+//! - 展开时：整体缩放（即上游设置里的岛体「大小」`island_size`）。各页面按固定版式绘制，只改宽度会让内容错位，所以按比例放大缩小。
+//! - 左右停靠（上游的停靠形态）时不提供：那时岛是竖向的，边缘不在这里。
 //! - 双击边缘恢复默认。
 use super::*;
 
@@ -28,7 +29,7 @@ pub(crate) struct Resize {
 impl App {
     /// 当前可以拖动的左右边缘（窗口坐标）。编辑、拖放、截图和临时预览期间不提供。
     pub(crate) fn resize_zones(&self, cx: f32, top: f32) -> Option<(ResizeKind, [Rect; 2])> {
-        if self.screenshot_capturing || self.is_editing() || self.drag_hot || self.subpage.is_some() { return None; }
+        if self.screenshot_capturing || self.is_editing() || self.drag_hot || self.subpage.is_some() || self.side() { return None; }
         let zone = |x0: f32, x1: f32, y0: f32, y1: f32| Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1));
         if self.open {
             if self.reveal < 0.95 || self.shots.preview.is_some() || self.mail.preview.is_some() { return None; }
@@ -86,14 +87,15 @@ impl App {
         let value = match kind {
             ResizeKind::Pill => self.base_size().0,
             ResizeKind::Lyric => self.lyric_width(),
-            ResizeKind::Panel => f32::from(self.settings.ui_scale),
+            // 从屏幕上实际显示的大小算起（可能被所在屏幕的上限压低）。
+            ResizeKind::Panel => self.settings.island_size.min(u32::from(self.ui_scale_max)) as f32,
         };
         self.resize = Some(Resize { kind, side, start, value, ppp: ctx.pixels_per_point(), before: self.settings.clone() });
         self.hover_since = None;
         self.leave_since = None;
     }
 
-    /// `last`：松开时按 1% 精确取值；拖动中按 5% 取整，减少重新排版字体的次数。
+    /// `last`：是否是松开时的最后一次更新（收起宽度与岛体大小都直接取当前值）。
     fn update_resize(&mut self, ctx: &egui::Context, env: &Env, last: bool) {
         let Some(resize) = self.resize.clone() else { return };
         let Some(x) = self.pointer_x(resize.kind, ctx, env) else { return };
@@ -113,9 +115,10 @@ impl App {
             }
             ResizeKind::Panel => {
                 let scale = resize.value * (1.0 + 2.0 * delta / (PW * resize.ppp));
-                let step = if last { 1.0 } else { 5.0 };
-                let (low, high) = (f32::from(*model::UI_SCALE_RANGE.start()), f32::from(*model::UI_SCALE_RANGE.end()));
-                self.settings.ui_scale = ((scale / step).round() * step).clamp(low, high) as u16;
+                // 上游的岛体大小按 5% 步进，拖动中和松开时都取到最近的一档。
+                let _ = last;
+                let cap = u32::from(self.ui_scale_max).max(model::ISLAND_SIZE_MIN);
+                self.settings.island_size = model::island_size_value((scale.max(0.0).round() as u32).min(cap));
             }
         }
     }
@@ -139,7 +142,7 @@ impl App {
         match kind {
             ResizeKind::Pill => self.settings.pill_width = 0,
             ResizeKind::Lyric => self.settings.lyric_width = 0,
-            ResizeKind::Panel => self.settings.ui_scale = 100,
+            ResizeKind::Panel => self.settings.island_size = 100,
         }
         if !self.open { self.snap_collapsed_width(); }
         if format!("{before:?}") != format!("{:?}", self.settings) && self.persist_settings(before) { self.say("已恢复默认大小"); }

@@ -456,3 +456,120 @@ impl std::fmt::Display for Error {
 
 /// Short for `Result<T, eframe::Error>`.
 pub type Result<T = (), E = Error> = std::result::Result<T, E>;
+
+// ----------------------------------------------------------------------------
+// 岛仔补丁：只放大/缩小主窗口（灵动岛）的界面，其它窗口（设置、更新、邮件）不受影响。
+//
+// egui 的 zoom_factor 是全局的，会连带设置窗口一起缩放；这里改为在主窗口的输入里
+// 把系统 DPI 乘上倍率，并把指针坐标、画布尺寸换算回同一套逻辑点。这样 egui 按
+// 真实物理像素重新栅格化文字与矢量图形，放大后依旧清晰，命中区也保持一致。
+
+#[cfg(not(target_arch = "wasm32"))]
+static ROOT_VIEWPORT_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000); // 1.0
+
+/// 设置主窗口的额外缩放倍率（下一帧生效）。非有限值或越界值会被收回到 0.5..=3.0。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_root_viewport_scale(scale: f32) {
+    let scale = if scale.is_finite() { scale.clamp(0.5, 3.0) } else { 1.0 };
+    ROOT_VIEWPORT_SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 当前主窗口的额外缩放倍率。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn root_viewport_scale() -> f32 {
+    f32::from_bits(ROOT_VIEWPORT_SCALE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// 把 egui-winit 产生的主窗口输入换算到放大后的逻辑点。
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn scale_root_input(raw: &mut egui::RawInput, scale: f32) {
+    if !scale.is_finite() || (scale - 1.0).abs() < 1e-4 {
+        return;
+    }
+    let inv = 1.0 / scale;
+    let pos = |p: egui::Pos2| egui::pos2(p.x * inv, p.y * inv);
+    let rect = |r: egui::Rect| egui::Rect::from_min_max(pos(r.min), pos(r.max));
+    if let Some(r) = raw.screen_rect.as_mut() {
+        *r = rect(*r);
+    }
+    if let Some(info) = raw.viewports.get_mut(&egui::ViewportId::ROOT) {
+        if let Some(ppp) = info.native_pixels_per_point.as_mut() {
+            *ppp *= scale;
+        }
+        info.inner_rect = info.inner_rect.map(rect);
+        info.outer_rect = info.outer_rect.map(rect);
+        info.monitor_size = info.monitor_size.map(|s| s * inv);
+    }
+    for event in &mut raw.events {
+        match event {
+            egui::Event::PointerMoved(p) => *p = pos(*p),
+            egui::Event::PointerButton { pos: p, .. } => *p = pos(*p),
+            egui::Event::Touch { pos: p, .. } => *p = pos(*p),
+            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, .. } => *delta *= inv,
+            _ => {}
+        }
+    }
+}
+
+/// 输入法候选框等输出坐标要换回 egui-winit 的逻辑点。
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn scale_root_output(output: &mut egui::PlatformOutput, scale: f32) {
+    if !scale.is_finite() || (scale - 1.0).abs() < 1e-4 {
+        return;
+    }
+    let rect = |r: egui::Rect| egui::Rect::from_min_max(egui::pos2(r.min.x * scale, r.min.y * scale), egui::pos2(r.max.x * scale, r.max.y * scale));
+    if let Some(ime) = output.ime.as_mut() {
+        ime.rect = rect(ime.rect);
+        ime.cursor_rect = rect(ime.cursor_rect);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod root_scale_tests {
+    use super::*;
+
+    #[test]
+    fn enlarged_root_uses_physical_font_pixels_with_settings_open() {
+        let ctx=egui::Context::default();
+        let child=egui::ViewportId::from_hash_of("settings-scale-check");
+        for dpi in [1.0,1.25,1.5] {
+            for scale in [0.8,1.0,1.2,1.4] {
+                let mut root=egui::RawInput::default();
+                root.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().native_pixels_per_point=Some(dpi);
+                scale_root_input(&mut root,scale);
+                let root_output=ctx.run(root,|ctx|{
+                    assert!((ctx.pixels_per_point()-dpi*scale).abs()<0.0001,"岛体的字形与矢量边缘必须按实际像素生成");
+                    ctx.fonts(|fonts|assert!((fonts.pixels_per_point()-dpi*scale).abs()<0.0001));
+                });
+                assert!((root_output.pixels_per_point-dpi*scale).abs()<0.0001);
+                let child_input=egui::RawInput{viewport_id:child,viewports:std::iter::once((child,egui::ViewportInfo{native_pixels_per_point:Some(dpi),..Default::default()})).collect(),..Default::default()};
+                let _=ctx.run(child_input,|ctx|assert_eq!(ctx.pixels_per_point(),dpi));
+            }
+        }
+    }
+
+    #[test]
+    fn root_input_is_converted_into_scaled_points() {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 300.0))),
+            events: vec![
+                egui::Event::PointerMoved(egui::pos2(600.0, 30.0)),
+                egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, 24.0), modifiers: Default::default() },
+            ],
+            ..Default::default()
+        };
+        raw.viewports.insert(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(1.25), ..Default::default() });
+        scale_root_input(&mut raw, 1.5);
+        assert_eq!(raw.screen_rect.unwrap().width(), 800.0);
+        assert_eq!(raw.viewports[&egui::ViewportId::ROOT].native_pixels_per_point, Some(1.875));
+        assert!(matches!(raw.events[0], egui::Event::PointerMoved(p) if p == egui::pos2(400.0, 20.0)));
+        assert!(matches!(raw.events[1], egui::Event::MouseWheel { delta, .. } if delta == egui::vec2(0.0, 16.0)));
+    }
+
+    #[test]
+    fn unit_scale_leaves_input_untouched() {
+        let mut raw = egui::RawInput { events: vec![egui::Event::PointerMoved(egui::pos2(3.0, 4.0))], ..Default::default() };
+        scale_root_input(&mut raw, 1.0);
+        assert!(matches!(raw.events[0], egui::Event::PointerMoved(p) if p == egui::pos2(3.0, 4.0)));
+    }
+}
