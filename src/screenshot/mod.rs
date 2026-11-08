@@ -7,6 +7,8 @@ pub mod capture;
 #[cfg(windows)]
 mod selection;
 #[cfg(windows)]
+mod annotate;
+#[cfg(windows)]
 mod service;
 #[cfg(windows)]
 pub use service::{unsaved, Capture, CaptureEvent};

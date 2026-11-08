@@ -1,5 +1,7 @@
 //! 截图选区的纯物理像素几何；不读取鼠标、不接触窗口，也不触发保存。
 
+use super::annotate::Tool;
+
 pub(super) type Point = (i32, i32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +52,7 @@ impl Grip {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Hit { Grip(Grip), Inside, Outside, Cancel, Save, Toolbar }
+pub(super) enum Hit { Grip(Grip), Inside, Outside, Cancel, Save, Tool(Tool), Undo, Toolbar }
 
 /// 全部值已经由所在屏幕的 DPI 换算为物理像素。
 #[derive(Clone, Copy, Debug)]
@@ -59,6 +61,8 @@ pub(super) struct SelectionMetrics {
     /// 绘制方块之外再增加的命中容差；不是相对中心的总半径。
     pub(super) hit_padding: i32,
     pub(super) toolbar_gap: i32,
+    /// 标注工具按钮（框、箭头、画笔、文字、打码、撤销）的宽度。
+    pub(super) tool_width: i32,
     pub(super) button_width: i32,
     pub(super) button_height: i32,
     pub(super) button_gap: i32,
@@ -68,6 +72,9 @@ pub(super) struct SelectionMetrics {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ToolbarLayout {
     pub(super) bounds: PixelRect,
+    /// 与 `Tool::ALL` 一一对应。
+    pub(super) tools: [PixelRect; 5],
+    pub(super) undo: PixelRect,
     pub(super) cancel: PixelRect,
     pub(super) save: PixelRect,
 }
@@ -89,17 +96,20 @@ pub(super) fn handles(rect: PixelRect, metrics: SelectionMetrics) -> [(Grip, Pix
     })
 }
 
-/// 工具栏首先置于选区下方，再尝试上方，最后放在选区右下角内侧。
-/// 极小显示区域仍优先保证整个工具栏及按钮不超出屏幕。
+/// 工具栏：`[框][箭头][画笔][文字][打码][撤销]  [取消][保存]`。
+/// 首先置于选区下方并右对齐，再尝试上方，最后放在选区右下角内侧；比屏幕宽时整体按比例压缩，始终不超出屏幕。
 pub(super) fn toolbar_layout(rect: PixelRect, bounds: PixelRect, metrics: SelectionMetrics) -> ToolbarLayout {
     let rect=rect.normalized();let bounds=bounds.normalized();
     let padding=metrics.padding.max(0) as i64;
     let gap=metrics.toolbar_gap.max(0) as i64;
     let button_gap=metrics.button_gap.max(0) as i64;
-    let width=(metrics.button_width.max(1) as i64*2+button_gap+padding*2)
-        .min(bounds.right as i64-bounds.left as i64);
-    let height=(metrics.button_height.max(1) as i64+padding*2)
-        .min(bounds.bottom as i64-bounds.top as i64);
+    let tool=metrics.tool_width.max(1) as i64;
+    let button=metrics.button_width.max(1) as i64;
+    // 每段：(宽度, 之后的间隙)。撤销与取消之间留三倍间隙，把标注和确认分开。
+    let segments:Vec<(i64,i64)>=(0..6).map(|i|(tool,if i==5 {button_gap*3} else {button_gap})).chain([(button,button_gap),(button,0)]).collect();
+    let content:i64=segments.iter().map(|(w,g)|w+g).sum();
+    let width=(content+padding*2).min(bounds.right as i64-bounds.left as i64);
+    let height=(metrics.button_height.max(1) as i64+padding*2).min(bounds.bottom as i64-bounds.top as i64);
     let below=rect.bottom as i64+gap;
     let above=rect.top as i64-gap-height;
     let (x,y)=if below>=bounds.top as i64 && below+height<=bounds.bottom as i64 {
@@ -112,23 +122,29 @@ pub(super) fn toolbar_layout(rect: PixelRect, bounds: PixelRect, metrics: Select
     let x=x.clamp(bounds.left as i64,bounds.right as i64-width);
     let y=y.clamp(bounds.top as i64,bounds.bottom as i64-height);
     let panel=PixelRect {left:coordinate(x),top:coordinate(y),right:coordinate(x+width),bottom:coordinate(y+height)};
-    // 在很窄的屏幕上先压缩内边距和按钮间隙，尽量给两个按钮各保留一个像素。
+    // 屏幕很窄时先压缩内边距，再按比例压缩所有按钮和间隙。
     let px=padding.min((width-2).max(0)/2);
     let py=padding.min((height-1).max(0)/2);
-    let inner_width=width-px*2;let inner_height=height-py*2;
-    let button_gap=button_gap.min((inner_width-2).max(0));
-    let cancel_width=(inner_width-button_gap)/2;
-    let cancel=PixelRect {left:coordinate(x+px),top:coordinate(y+py),
-        right:coordinate(x+px+cancel_width),bottom:coordinate(y+py+inner_height)};
-    let save=PixelRect {left:coordinate(x+px+cancel_width+button_gap),top:cancel.top,
-        right:coordinate(x+width-px),bottom:cancel.bottom};
-    ToolbarLayout {bounds:panel,cancel,save}
+    let inner_width=(width-px*2).max(0);
+    let scale=if content>0 {(inner_width as f64/content as f64).min(1.0)} else {1.0};
+    let (top,bottom)=(coordinate(y+py),coordinate(y+height-py));
+    let mut cursor=(x+px) as f64;
+    let mut rects=Vec::with_capacity(segments.len());
+    for (w,g) in &segments {
+        let left=cursor.round() as i64;
+        cursor+=*w as f64*scale;
+        rects.push(PixelRect {left:coordinate(left),top,right:coordinate((cursor.round() as i64).min(x+width-px)),bottom});
+        cursor+=*g as f64*scale;
+    }
+    ToolbarLayout {bounds:panel,tools:[rects[0],rects[1],rects[2],rects[3],rects[4]],undo:rects[5],cancel:rects[6],save:rects[7]}
 }
 
 /// 工具栏优先于控制点；狭窄选区的控制点命中区重叠时选最近中心，平局优先角点。
 /// Save 命中不表示可以保存；调用方仍须用 rect.valid() 禁用极小选区。
 pub(super) fn hit_test(rect: PixelRect, point: Point, bounds: PixelRect, metrics: SelectionMetrics) -> Hit {
     let toolbar=toolbar_layout(rect,bounds,metrics);
+    if let Some(index)=toolbar.tools.iter().position(|button|button.contains(point)) {return Hit::Tool(Tool::ALL[index]);}
+    if toolbar.undo.contains(point) {return Hit::Undo;}
     if toolbar.cancel.contains(point) {return Hit::Cancel;}
     if toolbar.save.contains(point) {return Hit::Save;}
     if toolbar.bounds.contains(point) {return Hit::Toolbar;}
@@ -169,7 +185,7 @@ mod tests {
     fn rect(left:i32,top:i32,right:i32,bottom:i32)->PixelRect {PixelRect {left,top,right,bottom}}
     fn metrics(dpi:i32)->SelectionMetrics {
         let px=|logical:i32|(logical*dpi+48)/96;
-        SelectionMetrics {handle_size:px(8),hit_padding:px(6),toolbar_gap:px(6),
+        SelectionMetrics {handle_size:px(8),hit_padding:px(6),toolbar_gap:px(6),tool_width:px(40),
             button_width:px(80),button_height:px(32),button_gap:px(8),padding:px(6)}
     }
     fn center(rect:PixelRect)->Point {(midpoint(rect.left,rect.right),midpoint(rect.top,rect.bottom))}
@@ -284,17 +300,35 @@ mod tests {
 
     #[test]
     fn toolbar_uses_below_then_above_then_inside_and_keeps_right_alignment() {
-        let screen=rect(0,0,500,500);let metrics=metrics(96);
-        let below=toolbar_layout(rect(100,100,400,300),screen,metrics);
-        assert_eq!((below.bounds.right,below.bounds.top),(400,306));
-        let above=toolbar_layout(rect(100,300,400,490),screen,metrics);
-        assert_eq!((above.bounds.right,above.bounds.bottom),(400,294));
-        let inside=toolbar_layout(rect(10,10,490,490),screen,metrics);
-        assert_eq!((inside.bounds.right,inside.bounds.bottom),(484,484));
-        for toolbar in [below,above,inside] {
-            assert!(contained(toolbar.bounds,screen));assert!(contained(toolbar.cancel,toolbar.bounds));assert!(contained(toolbar.save,toolbar.bounds));
+        let screen=rect(0,0,1000,500);let metrics=metrics(96);
+        let below=toolbar_layout(rect(100,100,800,300),screen,metrics);
+        assert_eq!((below.bounds.right,below.bounds.top),(800,306));
+        let above=toolbar_layout(rect(100,300,800,490),screen,metrics);
+        assert_eq!((above.bounds.right,above.bounds.bottom),(800,294));
+        let inside=toolbar_layout(rect(10,10,990,490),screen,metrics);
+        assert_eq!((inside.bounds.right,inside.bounds.bottom),(984,484));
+        // 选区比工具栏窄、靠左时，右对齐会伸出屏幕：整体夹回屏内。
+        let narrow=toolbar_layout(rect(10,100,60,200),screen,metrics);
+        assert_eq!(narrow.bounds.left,0);
+        for toolbar in [below,above,inside,narrow] {
+            assert!(contained(toolbar.bounds,screen));
+            for button in toolbar.tools.iter().chain([&toolbar.undo,&toolbar.cancel,&toolbar.save]) {assert!(contained(*button,toolbar.bounds));}
             assert_eq!(toolbar.cancel.width(),80);assert_eq!(toolbar.save.width(),80);
+            assert!(toolbar.tools.iter().all(|tool|tool.width()==40)&&toolbar.undo.width()==40);
+            assert!(toolbar.undo.right+24<=toolbar.cancel.left,"撤销与取消之间留出分隔");
         }
+    }
+
+    #[test]
+    fn tool_buttons_hit_in_order_and_win_over_the_selection() {
+        let screen=rect(0,0,1000,500);let metrics=metrics(96);let selection=rect(100,100,800,300);
+        let toolbar=toolbar_layout(selection,screen,metrics);
+        for (index,tool) in Tool::ALL.into_iter().enumerate() {
+            assert_eq!(hit_test(selection,center(toolbar.tools[index]),screen,metrics),Hit::Tool(tool));
+        }
+        assert_eq!(hit_test(selection,center(toolbar.undo),screen,metrics),Hit::Undo);
+        let inside=toolbar_layout(rect(0,0,1000,500),screen,metrics);
+        assert_eq!(hit_test(rect(0,0,1000,500),center(inside.tools[0]),screen,metrics),Hit::Tool(Tool::Box),"工具栏在选区内侧时按钮优先");
     }
 
     #[test]
@@ -315,7 +349,8 @@ mod tests {
         for (width,height) in [(100,30),(2,2),(1,1),(0,0)] {
             let screen=rect(-100,-100,-100+width,-100+height);
             let toolbar=toolbar_layout(screen,screen,metrics(192));
-            assert!(contained(toolbar.bounds,screen));assert!(contained(toolbar.cancel,toolbar.bounds));assert!(contained(toolbar.save,toolbar.bounds));
+            assert!(contained(toolbar.bounds,screen));
+            for button in toolbar.tools.iter().chain([&toolbar.undo,&toolbar.cancel,&toolbar.save]) {assert!(contained(*button,toolbar.bounds));}
             assert!(toolbar.cancel.right<=toolbar.save.left);
             assert_eq!((toolbar.bounds.width(),toolbar.bounds.height()),(width,height));
         }

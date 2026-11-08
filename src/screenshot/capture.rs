@@ -12,14 +12,19 @@ use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::{timing, SelectedImage};
+use super::annotate::{self, Mark, Shape, Tool};
 use super::selection::{self, Grip, Hit, PixelRect, SelectionMetrics, ToolbarLayout};
 
 const CLASS: PCWSTR = w!("DaozaiForkScreenshotOverlay");
 const TIMER: usize = 1;
+/// 文字输入框完成 / 取消（输入框的子类过程投递给遮罩窗口）。
+const WM_TEXT_DONE: u32 = WM_APP + 1;
+const WM_TEXT_CANCEL: u32 = WM_APP + 2;
 
 impl PixelRect {
     fn win32(self) -> RECT { RECT {left:self.left, top:self.top, right:self.right, bottom:self.bottom} }
@@ -197,28 +202,43 @@ fn freeze(island: HWND, cancel: &AtomicBool) -> Result<Vec<Frame>, String> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Button { Cancel, Save }
+enum Button { Cancel, Save, Tool(Tool), Undo }
+
+fn button_of(hit: Hit) -> Option<Button> {
+    match hit { Hit::Cancel => Some(Button::Cancel), Hit::Save => Some(Button::Save), Hit::Tool(tool) => Some(Button::Tool(tool)), Hit::Undo => Some(Button::Undo), _ => None }
+}
+
+/// 把点夹进选区，标注不画到选区外。
+fn clamp_into(point: (i32,i32), rect: PixelRect) -> (i32,i32) {
+    (point.0.clamp(rect.left, (rect.right-1).max(rect.left)), point.1.clamp(rect.top, (rect.bottom-1).max(rect.top)))
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Selection { monitor: usize, rect: PixelRect, adjustable: bool }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct VisualSelection { selection: Selection, pressed: Option<Button> }
+struct VisualSelection { selection: Selection, pressed: Option<Button>, tool: Option<Tool>, undo: bool }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Gesture {
     /// `previous`：按下前已调整好的选区。误点或拖出不足 2 像素时恢复它，避免误点丢掉选区。
     Draw { monitor: usize, start: (i32,i32), previous: Option<Selection> },
     Transform { monitor: usize, original: PixelRect, grip: Grip, start: (i32,i32), moved: bool },
     Button { monitor: usize, button: Button, inside: bool },
+    /// 正在画一笔标注（框、箭头、画笔、打码）；画笔的折线点由会话另外记录。
+    Annotate { monitor: usize, start: (i32,i32), current: (i32,i32) },
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Interaction { selection: Option<Selection>, gesture: Option<Gesture>, last_click_inside: bool }
+struct Interaction { selection: Option<Selection>, gesture: Option<Gesture>, last_click_inside: bool,
+    /// 当前标注工具；`None` 时选区可以调整、移动、重选。
+    tool: Option<Tool>,
+    /// 已完成的标注数，用于撤销按钮是否可用。
+    marks: usize }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action { Cancel, Save }
+enum Action { Cancel, Save, Tool(Tool), Undo, Annotated { monitor: usize, start: (i32,i32), end: (i32,i32) }, Reselected }
 
 impl Interaction {
     fn visual(self) -> Option<VisualSelection> {
         self.selection.map(|selection| VisualSelection {selection, pressed:match self.gesture {
             Some(Gesture::Button {button,inside:true,..}) => Some(button), _ => None,
-        }})
+        }, tool:self.tool, undo:self.marks>0})
     }
     fn hit(self, monitor: usize, point: (i32,i32), bounds: PixelRect, metrics: SelectionMetrics) -> Hit {
         if !bounds.contains(point) { return Hit::Outside; }
@@ -230,10 +250,18 @@ impl Interaction {
         self.last_click_inside = false;
         let hit = self.hit(monitor,point,bounds,metrics);
         match hit {
-            Hit::Cancel | Hit::Save => self.gesture = Some(Gesture::Button {monitor,button:if hit == Hit::Cancel {Button::Cancel}else{Button::Save},inside:true}),
+            Hit::Cancel | Hit::Save | Hit::Tool(_) | Hit::Undo => self.gesture = button_of(hit).map(|button|Gesture::Button {monitor,button,inside:true}),
             Hit::Grip(grip) => self.gesture = self.selection.map(|selected|Gesture::Transform {monitor,original:selected.rect,grip,start:point,moved:false}),
+            // 选了画图工具：在选区内拖动是画；文字由会话打开输入框，不产生手势。
+            Hit::Inside if self.tool.is_some_and(|tool|tool != Tool::Text) => self.gesture = self.selection.map(|selected|{
+                let start = clamp_into(point,selected.rect);
+                Gesture::Annotate {monitor,start,current:start}
+            }),
+            Hit::Inside if self.tool.is_some() => {},
             Hit::Inside => self.gesture = self.selection.map(|selected|Gesture::Transform {monitor,original:selected.rect,grip:Grip::Move,start:point,moved:false}),
             Hit::Toolbar => {},
+            // 选了工具时在选区外按下不重选，避免误点丢掉标注。
+            Hit::Outside if self.tool.is_some() => {},
             // 先不替换原选区：移动超过抖动阈值才开始画新框（见 pointer_move）。
             Hit::Outside => self.gesture = Some(Gesture::Draw {monitor,start:point,previous:self.selection}),
         }
@@ -257,8 +285,11 @@ impl Interaction {
             }
             Some(Gesture::Button {monitor:locked,button,..}) => {
                 let hit = self.hit(monitor,point,bounds,metrics);
-                let inside = locked == monitor && matches!((button,hit),(Button::Cancel,Hit::Cancel)|(Button::Save,Hit::Save));
+                let inside = locked == monitor && button_of(hit) == Some(button);
                 self.gesture = Some(Gesture::Button {monitor:locked,button,inside});
+            }
+            Some(Gesture::Annotate {monitor:locked,start,..}) if locked == monitor => {
+                if let Some(selected) = self.selection { self.gesture = Some(Gesture::Annotate {monitor:locked,start,current:clamp_into(point,selected.rect)}); }
             }
             _ => {},
         }
@@ -271,7 +302,7 @@ impl Interaction {
         match gesture {
             Some(Gesture::Draw {monitor:locked,previous,..}) if locked == monitor => {
                 match self.selection.filter(|selected|!selected.adjustable) {
-                    Some(drawn) if drawn.rect.valid() => self.selection = Some(Selection {adjustable:true,..drawn}),
+                    Some(drawn) if drawn.rect.valid() => { self.selection = Some(Selection {adjustable:true,..drawn}); return Some(Action::Reselected); }
                     // 误点或不足 2 × 2：恢复原选区；原来没有选区就回到“拖动框选”提示。
                     _ => self.selection = previous,
                 }
@@ -280,7 +311,15 @@ impl Interaction {
                 self.last_click_inside = !moved && self.hit(monitor,point,bounds,metrics)==Hit::Inside;
             }
             Some(Gesture::Button {monitor:locked,button,inside:true}) if locked == monitor => {
-                return match button { Button::Cancel => Some(Action::Cancel), Button::Save => self.confirmable().map(|_|Action::Save) };
+                return match button {
+                    Button::Cancel => Some(Action::Cancel),
+                    Button::Save => self.confirmable().map(|_|Action::Save),
+                    Button::Tool(tool) => Some(Action::Tool(tool)),
+                    Button::Undo => (self.marks > 0).then_some(Action::Undo),
+                };
+            }
+            Some(Gesture::Annotate {monitor:locked,start,current}) if locked == monitor => {
+                return Some(Action::Annotated {monitor:locked,start,end:current});
             }
             _ => {},
         }
@@ -290,7 +329,8 @@ impl Interaction {
         self.selection.filter(|selected|selected.adjustable && selected.rect.valid() && self.gesture.is_none())
     }
     fn double_click(self, monitor: usize, point: (i32,i32), bounds: PixelRect, metrics: SelectionMetrics) -> bool {
-        self.gesture.is_none() && self.last_click_inside && self.confirmable().is_some()
+        // 选了工具时双击不保存，避免画画时误存。
+        self.tool.is_none() && self.gesture.is_none() && self.last_click_inside && self.confirmable().is_some()
             && self.hit(monitor,point,bounds,metrics) == Hit::Inside
     }
 }
@@ -304,7 +344,7 @@ impl OverlayMetrics {
     fn for_dpi(dpi: u32) -> Self {
         let scale = |logical: i32| ((logical as i64 * dpi.max(96) as i64 + 48) / 96).clamp(1, i32::MAX as i64) as i32;
         Self {font_height:scale(16), margin:scale(24), gap:scale(6), padding_x:scale(8), padding_y:scale(4), border:scale(2),
-            selection:SelectionMetrics {handle_size:scale(8),hit_padding:scale(6),toolbar_gap:scale(8),button_width:scale(88),button_height:scale(34),button_gap:scale(4),padding:scale(6)}}
+            selection:SelectionMetrics {handle_size:scale(8),hit_padding:scale(6),toolbar_gap:scale(8),tool_width:scale(46),button_width:scale(88),button_height:scale(34),button_gap:scale(4),padding:scale(6)}}
     }
 }
 
@@ -337,6 +377,7 @@ impl OverlayStyle {
 struct OverlayLayout {
     selection: Option<PixelRect>, handles: Vec<PixelRect>, toolbar: Option<ToolbarLayout>,
     save_enabled: bool, pressed: Option<Button>, label: PixelRect, text: Vec<u16>,
+    tool: Option<Tool>, undo_enabled: bool,
 }
 
 fn overlay_layout(frame: &Frame, style: &OverlayStyle, visual: Option<VisualSelection>) -> Result<OverlayLayout, String> {
@@ -392,7 +433,8 @@ fn overlay_layout(frame: &Frame, style: &OverlayStyle, visual: Option<VisualSele
             }
         }
     }
-    Ok(OverlayLayout {selection,handles,toolbar,save_enabled:selection.is_some_and(PixelRect::valid),pressed:visual.and_then(|v|v.pressed),label,text})
+    Ok(OverlayLayout {selection,handles,toolbar,save_enabled:selection.is_some_and(PixelRect::valid),pressed:visual.and_then(|v|v.pressed),label,text,
+        tool:visual.and_then(|v|v.tool),undo_enabled:visual.is_some_and(|v|v.undo)})
 }
 
 fn changed_monitors(before: Option<VisualSelection>, after: Option<VisualSelection>) -> Vec<usize> {
@@ -425,7 +467,7 @@ fn cursor_for_hit(hit: Hit) -> PCWSTR {
         Hit::Grip(Grip::East|Grip::West) => IDC_SIZEWE,
         Hit::Grip(Grip::North|Grip::South) => IDC_SIZENS,
         Hit::Grip(Grip::Move)|Hit::Inside => IDC_SIZEALL,
-        Hit::Cancel|Hit::Save => IDC_HAND,
+        Hit::Cancel|Hit::Save|Hit::Tool(_)|Hit::Undo => IDC_HAND,
         Hit::Outside|Hit::Toolbar => IDC_CROSS,
     }
 }
@@ -466,13 +508,34 @@ unsafe fn draw_text(dc: HDC, style: &OverlayStyle, text: &[u16], rect: PixelRect
 
 /// 所有合成均在小缓冲里完成，返回后只需一次 BitBlt 呈现；原帧不会被修改。
 unsafe fn render_dirty(frame: &Frame, dark: &Bitmap, style: &OverlayStyle, layout: &OverlayLayout, dirty: PixelRect) -> Result<Bitmap, String> {
+    render_dirty_with(frame, dark, None, style, layout, None, dirty)
+}
+
+/// 同上，另外画出已标注帧（`annotated`）和正在画的一笔（`live`）。
+unsafe fn render_dirty_with(frame: &Frame, dark: &Bitmap, annotated: Option<&Bitmap>, style: &OverlayStyle, layout: &OverlayLayout,
+    live: Option<(&Shape, annotate::Style)>, dirty: PixelRect) -> Result<Bitmap, String> {
     let buffer = Bitmap::new(frame.image.dc, dirty.width(), dirty.height())?;
     BitBlt(buffer.dc, 0, 0, dirty.width(), dirty.height(), dark.dc, dirty.left, dirty.top, SRCCOPY)
         .map_err(|e| format!("绘制截图暗帧失败：{e}"))?;
+    let source = annotated.unwrap_or(&frame.image);
     if let Some(rect) = layout.selection.filter(|rect| rect.width() > 0 && rect.height() > 0 && rect.expand(style.metrics.border).intersect(dirty).is_some()) {
         if let Some(visible) = rect.intersect(dirty) {
-            BitBlt(buffer.dc, visible.left-dirty.left, visible.top-dirty.top, visible.width(), visible.height(), frame.image.dc, visible.left, visible.top, SRCCOPY)
+            BitBlt(buffer.dc, visible.left-dirty.left, visible.top-dirty.top, visible.width(), visible.height(), source.dc, visible.left, visible.top, SRCCOPY)
                 .map_err(|e| format!("绘制截图选区失败：{e}"))?;
+        }
+        if let Some((shape, anno)) = live.filter(|(shape, anno)| annotate::bounds(shape, *anno).intersect(dirty).is_some()) {
+            match shape {
+                Shape::Mosaic(a, b) => {
+                    let area = PixelRect {left:a.0.min(b.0),top:a.1.min(b.1),right:a.0.max(b.0),bottom:a.1.max(b.1)};
+                    if let Some(area) = area.intersect(rect) {
+                        let _ = GdiFlush();
+                        let src = std::slice::from_raw_parts(source.bits, byte_length(source.width, source.height)?);
+                        let dst = std::slice::from_raw_parts_mut(buffer.bits, byte_length(dirty.width(), dirty.height())?);
+                        annotate::mosaic_into(src, source.width, source.height, dst, dirty, area, anno.block);
+                    }
+                }
+                other => annotate::draw(buffer.dc, other, anno, (dirty.left, dirty.top))?,
+            }
         }
         let pen = CreatePen(PS_SOLID, style.metrics.border, COLORREF(0x00ffb34d));
         if pen.is_invalid() { return Err("创建截图选区边框失败".into()); }
@@ -497,10 +560,13 @@ unsafe fn render_dirty(frame: &Frame, dark: &Bitmap, style: &OverlayStyle, layou
     }
     if let Some(toolbar)=layout.toolbar.filter(|toolbar|toolbar.bounds.intersect(dirty).is_some()) {
         fill(buffer.dc,toolbar.bounds.offset(-dirty.left,-dirty.top),COLORREF(0x00202020))?;
-        for (button,rect,label) in [(Button::Cancel,toolbar.cancel,"✕ 取消"),(Button::Save,toolbar.save,"✓ 保存")] {
+        let tools=Tool::ALL.into_iter().enumerate().map(|(index,tool)|(Button::Tool(tool),toolbar.tools[index],tool.label()));
+        for (button,rect,label) in tools.chain([(Button::Undo,toolbar.undo,"撤销"),(Button::Cancel,toolbar.cancel,"✕ 取消"),(Button::Save,toolbar.save,"✓ 保存")]) {
             if rect.intersect(dirty).is_none() {continue;}
-            let enabled=button==Button::Cancel || layout.save_enabled;
-            let background=if enabled && layout.pressed==Some(button) {0x00505050}else{0x00343434};
+            let enabled=match button {Button::Save=>layout.save_enabled,Button::Undo=>layout.undo_enabled,_=>true};
+            let selected=matches!(button,Button::Tool(tool) if layout.tool==Some(tool));
+            // 选中的工具为蓝色；按下时更亮。
+            let background=if enabled && layout.pressed==Some(button) {0x00505050} else if selected {0x00a8622a} else {0x00343434};
             let rect=rect.offset(-dirty.left,-dirty.top);
             fill(buffer.dc,rect,COLORREF(background))?;
             let text:Vec<u16>=label.encode_utf16().collect();
@@ -520,9 +586,146 @@ struct Session<'a> {
     armed: Cell<bool>,
     cancel: &'a AtomicBool,
     previous_foreground: HWND,
+    /// 标注（按完成顺序）、每块屏的已标注帧、正在画的画笔折线、文字输入框，以及每块屏按 DPI 换算的标注样式。
+    marks: RefCell<Vec<Mark>>,
+    annotated: RefCell<Vec<Option<Bitmap>>>,
+    stroke: RefCell<Vec<(i32,i32)>>,
+    edit: RefCell<Option<TextEdit>>,
+    anno_styles: RefCell<Vec<annotate::Style>>,
+}
+
+/// 正在输入的文字：Win32 EDIT 子控件（原生支持输入法）。
+struct TextEdit { hwnd: HWND, monitor: usize, at: (i32,i32), _font: OverlayFont }
+
+/// 输入框里 Enter 完成、Esc 取消（只取消这段文字），投递给遮罩窗口处理。
+unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, parent: usize) -> LRESULT {
+    let parent = HWND(parent as *mut _);
+    match msg {
+        WM_KEYDOWN if wp.0 == 0x0d => { let _ = PostMessageW(parent, WM_TEXT_DONE, WPARAM(0), LPARAM(0)); return LRESULT(0); }
+        WM_KEYDOWN if wp.0 == 0x1b => { let _ = PostMessageW(parent, WM_TEXT_CANCEL, WPARAM(0), LPARAM(0)); return LRESULT(0); }
+        // 吞掉对应的字符消息，避免单行输入框“嘀”一声。
+        WM_CHAR if wp.0 == 0x0d || wp.0 == 0x1b => return LRESULT(0),
+        _ => {}
+    }
+    DefSubclassProc(hwnd, msg, wp, lp)
 }
 
 impl Session<'_> {
+    fn anno_style(&self, index: usize) -> annotate::Style {
+        self.anno_styles.borrow().get(index).copied().unwrap_or_else(|| annotate::Style::for_dpi(96))
+    }
+    /// 正在画的一笔（只有选了框、箭头、画笔、打码且正在拖动时才有）。
+    fn live_shape(&self) -> Option<(usize, Shape)> {
+        let interaction = self.interaction.get();
+        let Some(Gesture::Annotate {monitor,start,current}) = interaction.gesture else { return None };
+        let shape = match interaction.tool? {
+            Tool::Box => Shape::Box(start,current),
+            Tool::Arrow => Shape::Arrow(start,current),
+            Tool::Mosaic => Shape::Mosaic(start,current),
+            Tool::Pen => Shape::Pen(self.stroke.borrow().clone()),
+            Tool::Text => return None,
+        };
+        Some((monitor,shape))
+    }
+    fn invalidate(&self, index: usize, rect: PixelRect) {
+        if let (Some(rect), Some(&hwnd)) = (rect.intersect(self.bounds(index)), self.windows.borrow().get(index)) {
+            unsafe { let _ = InvalidateRect(hwnd, Some(&rect.win32()), false); }
+        }
+    }
+    /// 重建这块屏的已标注帧：原帧像素 + 依次叠加该屏的全部标注。没有标注时释放。
+    fn rerender(&self, index: usize) -> Result<(), String> {
+        let marks = self.marks.borrow();
+        let shapes: Vec<&Shape> = marks.iter().filter(|mark| mark.monitor == index).map(|mark| &mark.shape).collect();
+        let mut annotated = self.annotated.borrow_mut();
+        if annotated.len() < self.frames.len() { annotated.resize_with(self.frames.len(), || None); }
+        if shapes.is_empty() { annotated[index] = None; return Ok(()); }
+        let frame = &self.frames[index].image;
+        if annotated[index].is_none() { annotated[index] = Some(unsafe { Bitmap::new(frame.dc, frame.width, frame.height)? }); }
+        let target = annotated[index].as_ref().unwrap();
+        let length = byte_length(frame.width, frame.height)?;
+        unsafe {
+            let _ = GdiFlush();
+            std::ptr::copy_nonoverlapping(frame.bits, target.bits, length);
+            annotate::render(target.dc, std::slice::from_raw_parts_mut(target.bits, length), frame.width, frame.height, &shapes, self.anno_style(index))
+        }
+    }
+    fn set_marks(&self, count: usize) {
+        let mut interaction = self.interaction.get();
+        interaction.marks = count;
+        self.set_interaction(interaction);
+    }
+    fn add_mark(&self, mark: Mark) {
+        let (monitor, area) = (mark.monitor, annotate::bounds(&mark.shape, self.anno_style(mark.monitor)));
+        self.marks.borrow_mut().push(mark);
+        if self.rerender(monitor).is_err() { self.finish(Outcome::Failed("绘制截图标注失败")); return; }
+        self.invalidate(monitor, area);
+        self.set_marks(self.marks.borrow().len());
+    }
+    /// 撤掉最后一个标注。
+    fn undo(&self) {
+        let Some(mark) = self.marks.borrow_mut().pop() else { return };
+        if self.rerender(mark.monitor).is_err() { self.finish(Outcome::Failed("绘制截图标注失败")); return; }
+        self.invalidate(mark.monitor, annotate::bounds(&mark.shape, self.anno_style(mark.monitor)));
+        self.set_marks(self.marks.borrow().len());
+    }
+    /// 重新框选出新选区时清空标注。
+    fn clear_marks(&self) {
+        self.cancel_text();
+        let monitors: Vec<usize> = self.marks.borrow().iter().map(|mark| mark.monitor).collect();
+        self.marks.borrow_mut().clear();
+        self.annotated.borrow_mut().iter_mut().for_each(|slot| *slot = None);
+        for monitor in monitors { self.invalidate(monitor, self.bounds(monitor)); }
+        self.set_marks(0);
+    }
+    /// 在选区内点击处打开文字输入框。
+    fn open_text(&self, index: usize, point: (i32,i32)) {
+        let Some(selected) = self.interaction.get().selection else { return };
+        let Some(&parent) = self.windows.borrow().get(index) else { return };
+        let style = self.anno_style(index);
+        let height = (style.font * 1.45).ceil() as i32;
+        let width = (selected.rect.right - point.0).max((style.font * 6.0) as i32);
+        unsafe {
+            let font = CreateFontW(-(style.font as i32), 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0, DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32, CLEARTYPE_QUALITY.0 as u32, DEFAULT_PITCH.0 as u32, w!("Microsoft YaHei"));
+            if font.is_invalid() { return; }
+            let Ok(module) = GetModuleHandleW(None) else { let _ = DeleteObject(font); return };
+            let Ok(hwnd) = CreateWindowExW(WINDOW_EX_STYLE(0), w!("EDIT"), w!(""), WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                point.0, point.1, width, height, parent, None, HINSTANCE(module.0), None) else { let _ = DeleteObject(font); return };
+            SendMessageW(hwnd, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
+            // EM_SETMARGINS(EC_LEFTMARGIN | EC_RIGHTMARGIN, 0)：文字从点击处开始，与保存后的位置一致。
+            SendMessageW(hwnd, 0x00D3, WPARAM(3), LPARAM(0));
+            let _ = SetWindowSubclass(hwnd, Some(edit_proc), 1, parent.0 as usize);
+            let _ = SetFocus(hwnd);
+            *self.edit.borrow_mut() = Some(TextEdit {hwnd, monitor:index, at:point, _font:OverlayFont(font)});
+        }
+    }
+    /// 完成输入：非空文字作为标注保存。
+    fn commit_text(&self) {
+        let Some(edit) = self.edit.borrow_mut().take() else { return };
+        let text = unsafe {
+            let length = GetWindowTextLengthW(edit.hwnd).max(0) as usize;
+            let mut buffer = vec![0u16; length + 1];
+            let copied = GetWindowTextW(edit.hwnd, &mut buffer).max(0) as usize;
+            let _ = DestroyWindow(edit.hwnd);
+            if let Some(&parent) = self.windows.borrow().get(edit.monitor) { let _ = SetFocus(parent); }
+            String::from_utf16_lossy(&buffer[..copied.min(length)])
+        };
+        let style = self.anno_style(edit.monitor);
+        let shape = Shape::Text {at:edit.at, size:(0,0), text};
+        if annotate::too_short(&shape, style) { return; }
+        let Shape::Text {at, text, ..} = shape else { return };
+        let size = unsafe { annotate::measure_text(self.frames[edit.monitor].image.dc, &text, style) }
+            .unwrap_or(((style.font * 1.1) as i32 * text.chars().count() as i32, (style.font * 1.5) as i32));
+        self.add_mark(Mark {monitor:edit.monitor, shape:Shape::Text {at, text, size}});
+    }
+    /// 取消输入：只丢掉这段文字。
+    fn cancel_text(&self) {
+        let Some(edit) = self.edit.borrow_mut().take() else { return };
+        unsafe {
+            let _ = DestroyWindow(edit.hwnd);
+            if let Some(&parent) = self.windows.borrow().get(edit.monitor) { let _ = SetFocus(parent); }
+        }
+    }
     fn finish(&self, result: Outcome) {
         if self.outcome.get().is_none() { self.outcome.set(Some(result)); }
     }
@@ -548,25 +751,70 @@ impl Session<'_> {
     }
     fn pointer_down(&self, index: usize, point: (i32,i32)) -> bool {
         if self.outcome.get().is_some() {return false;}
+        // 输入框开着时点别处：先完成文字，再处理这次点击（例如点「保存」时文字也会保存进去）。
+        if self.edit.borrow().is_some() { self.commit_text(); }
         let mut interaction=self.interaction.get();
-        interaction.pointer_down(index,point,self.bounds(index),self.styles.borrow()[index].metrics.selection);
+        let (bounds,metrics)=(self.bounds(index),self.styles.borrow()[index].metrics.selection);
+        if interaction.tool == Some(Tool::Text) && interaction.gesture.is_none() && interaction.hit(index,point,bounds,metrics) == Hit::Inside {
+            self.open_text(index,point);
+            return false;
+        }
+        interaction.pointer_down(index,point,bounds,metrics);
+        if let (Some(Gesture::Annotate {start,..}),Some(Tool::Pen)) = (interaction.gesture,interaction.tool) { *self.stroke.borrow_mut() = vec![start]; }
         let capture=interaction.gesture.is_some();
         self.set_interaction(interaction);
+        if let Some((monitor,shape)) = self.live_shape() { self.invalidate(monitor, annotate::bounds(&shape, self.anno_style(monitor))); }
         capture
     }
     fn pointer_move(&self, index: usize, point: (i32,i32)) {
         if self.outcome.get().is_some() {return;}
+        let before = self.live_shape();
         let mut interaction=self.interaction.get();
         interaction.pointer_move(index,point,self.bounds(index),self.styles.borrow()[index].metrics.selection);
+        let mut segment = None;
+        if let (Some(Gesture::Annotate {monitor,current,..}),Some(Tool::Pen)) = (interaction.gesture,interaction.tool) {
+            let mut stroke = self.stroke.borrow_mut();
+            if let Some(&last) = stroke.last().filter(|last| **last != current) { stroke.push(current); segment = Some((monitor,Shape::Pen(vec![last,current]))); }
+        }
         self.set_interaction(interaction);
+        // 画笔只重画新加的一段；其他形状重画新旧两笔的范围。
+        let dirty: Vec<(usize,Shape)> = match segment { Some(segment) => vec![segment], None => before.into_iter().chain(self.live_shape()).collect() };
+        for (monitor,shape) in dirty { self.invalidate(monitor, annotate::bounds(&shape, self.anno_style(monitor))); }
     }
     fn pointer_up(&self, index: usize, point: (i32,i32)) {
         if self.outcome.get().is_some() {return;}
         let confirmed_at=Instant::now();
+        let live=self.live_shape();
         let mut interaction=self.interaction.get();
+        let tool=interaction.tool;
         let action=interaction.pointer_up(index,point,self.bounds(index),self.styles.borrow()[index].metrics.selection);
         self.set_interaction(interaction);
-        match action {Some(Action::Cancel)=>self.finish(Outcome::Cancelled),Some(Action::Save)=>self.confirm_at(confirmed_at),None=>{}}
+        match action {
+            Some(Action::Cancel)=>self.finish(Outcome::Cancelled),
+            Some(Action::Save)=>self.confirm_at(confirmed_at),
+            Some(Action::Tool(chosen))=>{
+                let mut interaction=self.interaction.get();
+                interaction.tool=if interaction.tool==Some(chosen) {None} else {Some(chosen)};
+                self.set_interaction(interaction);
+            }
+            Some(Action::Undo)=>self.undo(),
+            Some(Action::Annotated {monitor,start,end})=>{
+                let shape=match tool {
+                    Some(Tool::Box)=>Shape::Box(start,end),
+                    Some(Tool::Arrow)=>Shape::Arrow(start,end),
+                    Some(Tool::Mosaic)=>Shape::Mosaic(start,end),
+                    Some(Tool::Pen)=>Shape::Pen(std::mem::take(&mut *self.stroke.borrow_mut())),
+                    _=>return,
+                };
+                if annotate::too_short(&shape,self.anno_style(monitor)) {
+                    if let Some((monitor,shape))=live { self.invalidate(monitor, annotate::bounds(&shape, self.anno_style(monitor))); }
+                } else {
+                    self.add_mark(Mark {monitor,shape});
+                }
+            }
+            Some(Action::Reselected)=>self.clear_marks(),
+            None=>{}
+        }
     }
     fn confirm(&self) {
         self.confirm_at(Instant::now());
@@ -586,10 +834,16 @@ impl Session<'_> {
         let interaction=self.interaction.get();
         let hit=match interaction.gesture {
             Some(Gesture::Transform {original,grip,start,..}) => Hit::Grip(transformed_grip(grip,original,start,point)),
-            Some(Gesture::Draw {..}) => Hit::Outside,
+            Some(Gesture::Draw {..}) | Some(Gesture::Annotate {..}) => Hit::Outside,
             _ => interaction.hit(index,point,self.bounds(index),self.styles.borrow()[index].metrics.selection),
         };
-        if let Ok(cursor)=LoadCursorW(None,cursor_for_hit(hit)) {SetCursor(cursor);}
+        // 选了工具时选区内是画图光标（文字为 I 形）。
+        let cursor = match (interaction.tool, hit) {
+            (Some(Tool::Text), Hit::Inside) => IDC_IBEAM,
+            (Some(_), Hit::Inside) => IDC_CROSS,
+            _ => cursor_for_hit(hit),
+        };
+        if let Ok(cursor)=LoadCursorW(None,cursor) {SetCursor(cursor);}
     }
     fn own_window(&self, hwnd: HWND) -> bool { self.windows.borrow().contains(&hwnd) }
     fn cursor(&self, index: usize) -> Option<(i32, i32)> {
@@ -606,8 +860,11 @@ impl Session<'_> {
         let dirty = PixelRect {left:ps.rcPaint.left,top:ps.rcPaint.top,right:ps.rcPaint.right,bottom:ps.rcPaint.bottom}.intersect(bounds);
         let styles = self.styles.borrow();
         if let (Some(dirty), Some(style)) = (dirty, styles.get(index)) {
+            let annotated = self.annotated.borrow();
+            let live = self.live_shape().filter(|(monitor,_)| *monitor == index).map(|(_,shape)| shape);
+            let anno = self.anno_style(index);
             let result = overlay_layout(frame, style, self.interaction.get().visual().filter(|visual| visual.selection.monitor == index))
-                .and_then(|layout| render_dirty(frame, &self.dark_frames[index], style, &layout, dirty))
+                .and_then(|layout| render_dirty_with(frame, &self.dark_frames[index], annotated.get(index).and_then(Option::as_ref), style, &layout, live.as_ref().map(|shape| (shape, anno)), dirty))
                 .and_then(|buffer| BitBlt(dc, dirty.left, dirty.top, dirty.width(), dirty.height(), buffer.dc, 0, 0, SRCCOPY).map_err(|e|e.to_string()));
             if result.is_err() { self.finish(Outcome::Failed("绘制截图遮罩失败")); }
         }
@@ -674,6 +931,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if let Some(point)=session.cursor(data.index) {session.set_cursor(data.index,point);return LRESULT(1);}
             DefWindowProcW(hwnd,msg,wp,lp)
         }
+        WM_CTLCOLOREDIT => {
+            // 文字输入框：白底红字，完成后才以红字（无底色）画进截图。
+            let dc = HDC(wp.0 as *mut _);
+            SetTextColor(dc, COLORREF(0x00303BFF)); SetBkColor(dc, COLORREF(0x00FFFFFF));
+            LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
+        }
+        WM_TEXT_DONE => { session.commit_text(); LRESULT(0) }
+        WM_TEXT_CANCEL => { session.cancel_text(); LRESULT(0) }
+        WM_KEYDOWN if wp.0 == 0x5A && GetKeyState(VK_CONTROL.0 as i32) < 0 => { session.undo(); LRESULT(0) }
         WM_KEYDOWN | WM_SYSKEYDOWN if wp.0 == 0x0d => {session.confirm();LRESULT(0)}
         WM_KEYDOWN | WM_SYSKEYDOWN if wp.0 == 0x1b => { session.finish(Outcome::Cancelled); LRESULT(0) }
         WM_RBUTTONDOWN | WM_RBUTTONUP | WM_CANCELMODE | WM_CLOSE | WM_DISPLAYCHANGE | WM_DPICHANGED | WM_ENDSESSION => {
@@ -710,7 +976,8 @@ pub(crate) fn select(island: HWND, cancel: &AtomicBool) -> Result<Option<Selecte
         // Box 保证每个窗口 USERDATA 在 Vec 扩容时也保持稳定。
         // 声明顺序保证任意 ? 提前返回也先销毁 session 的窗口，再释放 USERDATA。
         let mut window_data: Vec<Box<WindowData<'_>>> = Vec::new();
-        let session = Box::new(Session {frames, dark_frames, styles:RefCell::new(Vec::new()), windows:RefCell::new(Vec::new()), interaction:Cell::new(Interaction::default()), outcome:Cell::new(None), armed:Cell::new(false), cancel, previous_foreground});
+        let session = Box::new(Session {frames, dark_frames, styles:RefCell::new(Vec::new()), windows:RefCell::new(Vec::new()), interaction:Cell::new(Interaction::default()), outcome:Cell::new(None), armed:Cell::new(false), cancel, previous_foreground,
+            marks:RefCell::new(Vec::new()), annotated:RefCell::new(Vec::new()), stroke:RefCell::new(Vec::new()), edit:RefCell::new(None), anno_styles:RefCell::new(Vec::new())});
         for (index, frame) in session.frames.iter().enumerate() {
             let data = Box::new(WindowData {session:&*session, index});
             let hwnd = match CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, CLASS, w!("岛仔区域截图"), WS_POPUP,
@@ -722,6 +989,7 @@ pub(crate) fn select(island: HWND, cancel: &AtomicBool) -> Result<Option<Selecte
             session.windows.borrow_mut().push(hwnd);
             window_data.push(data);
             session.styles.borrow_mut().push(OverlayStyle::new(GetDpiForWindow(hwnd))?);
+            session.anno_styles.borrow_mut().push(annotate::Style::for_dpi(GetDpiForWindow(hwnd)));
             if SetTimer(hwnd, TIMER, 30, None) == 0 { drop(session); return Err("创建截图取消定时器失败".into()); }
         }
         if cancel.load(Ordering::Acquire) { drop(session); return Ok(None); }
@@ -742,7 +1010,11 @@ pub(crate) fn select(island: HWND, cancel: &AtomicBool) -> Result<Option<Selecte
         let result = match session.outcome.take() {
             Some(Outcome::Failed(error)) => { drop(session); return Err(error.into()); }
             Some(Outcome::Selected {monitor, rect, confirmed_at}) => {
-                let rgba = session.frames[monitor].image.crop(rect)?;
+                // 有标注时从已标注帧裁剪，保存和复制的就是标好的图。
+                let annotated = session.annotated.borrow();
+                let source = annotated.get(monitor).and_then(Option::as_ref).unwrap_or(&session.frames[monitor].image);
+                let rgba = source.crop(rect)?;
+                drop(annotated);
                 Some(SelectedImage {width:rect.width() as u32, height:rect.height() as u32, rgba, confirmed_at, root:None, seq:None, retry:false})
             }
             _ => None,
