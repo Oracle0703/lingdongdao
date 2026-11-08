@@ -14,6 +14,9 @@ struct Shell {
     t0: Instant,
     #[cfg(windows)]
     frame_at: Instant,
+    /// 上一帧岛在形变：这一帧开头用 DwmFlush 对齐屏幕合成。
+    #[cfg(windows)]
+    vblank: bool,
     media: smtc::Shared,
     media_sources: smtc::Sources,
     seek_rx: Option<std::sync::mpsc::Receiver<bool>>,
@@ -134,6 +137,8 @@ impl Shell {
             t0: Instant::now(),
             #[cfg(windows)]
             frame_at: Instant::now(),
+            #[cfg(windows)]
+            vblank: false,
             media,
             media_sources,
             seek_rx: None,
@@ -340,6 +345,7 @@ impl Shell {
             charging: self.sys.1,
             network: Some(self.system_state.network),
             cursor,
+            cursor_px: cursor_screen_px(),
             idle_seconds: {
                 #[cfg(windows)] {Some(daozai::system::idle_seconds())}
                 #[cfg(not(windows))] {None}
@@ -367,9 +373,13 @@ impl eframe::App for Shell {
         if let Ok(mut sources)=self.media_sources.lock(){sources.preferred.clone_from(&self.app.settings.music_source);}
         #[cfg(windows)]
         {
-            // 用帧间隔限制刷新，绕过部分 Intel 驱动在垂直同步中的忙等待。
-            let delay=Duration::from_secs_f64(1.0/60.0).saturating_sub(self.frame_at.elapsed());
-            if !delay.is_zero(){std::thread::sleep(delay);}
+            // 岛在形变时跟随系统合成节奏出帧（DwmFlush 等到下一次合成，不像垂直同步那样在部分 Intel 驱动上忙等），
+            // 每次屏幕刷新恰好一帧，动画不再忽快忽慢；静止时仍用帧间隔限制刷新。
+            let synced=self.vblank && unsafe{windows::Win32::Graphics::Dwm::DwmFlush()}.is_ok();
+            if !synced {
+                let delay=Duration::from_secs_f64(1.0/60.0).saturating_sub(self.frame_at.elapsed());
+                if !delay.is_zero(){std::thread::sleep(delay);}
+            }
             self.frame_at=Instant::now();
         }
         #[cfg(windows)]
@@ -500,7 +510,7 @@ impl eframe::App for Shell {
             // 保留主窗口的事件循环，避免全屏隐藏后设置窗口无法关闭或重新打开。
             let region=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.region)};
             let hit=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
-            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded);
+            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded, out.morphing);
         }
         for cmd in out.cmds {
             match cmd {
@@ -630,7 +640,10 @@ impl eframe::App for Shell {
         self.app.mail_reader_ui(ctx);
         #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;
-        schedule_repaint(ctx,repaint_after);
+        // 形变中立即请求下一帧，由下一帧开头的 DwmFlush 对齐屏幕刷新。
+        #[cfg(windows)] { self.vblank=out.morphing && !self.hidden; }
+        #[cfg(windows)] if self.vblank { ctx.request_repaint(); } else { schedule_repaint(ctx,repaint_after); }
+        #[cfg(not(windows))] schedule_repaint(ctx,repaint_after);
     }
 }
 
@@ -726,6 +739,17 @@ fn cursor_logical(ppp: f32) -> Option<(f32, f32)> {
     unsafe { GetCursorPos(&mut p) }.ok()?;
     Some((p.x as f32 / ppp, p.y as f32 / ppp))
 }
+
+/// 光标的屏幕物理像素坐标（拖动缩放岛时使用）。
+#[cfg(windows)]
+fn cursor_screen_px() -> Option<(f32, f32)> {
+    let mut p = windows::Win32::Foundation::POINT::default();
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) }.ok()?;
+    Some((p.x as f32, p.y as f32))
+}
+
+#[cfg(not(windows))]
+fn cursor_screen_px() -> Option<(f32, f32)> { None }
 
 #[cfg(not(windows))]
 fn cursor_logical(_ppp: f32) -> Option<(f32, f32)> {

@@ -55,10 +55,10 @@ static EXTRA_SCALE_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::A
 static EXTRA_SCALE_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000); // 1.0
 
 /// 岛仔补丁：为原生句柄为 `raw_handle`（Windows 上是 HWND）的窗口设置额外放大倍数；
-/// 倍数不大于 1 或无效时恢复为系统缩放。生效于该窗口的下一帧。
+/// 倍数须在 0.5–3 之间，否则恢复为系统缩放。生效于该窗口的下一帧。
 pub fn set_window_extra_scale(raw_handle: isize, scale: f32) {
     use std::sync::atomic::Ordering;
-    let scale = if scale.is_finite() && scale > 1.0 { scale } else { 1.0 };
+    let scale = if scale.is_finite() && (0.5..=3.0).contains(&scale) { scale } else { 1.0 };
     EXTRA_SCALE_BITS.store(scale.to_bits(), Ordering::Release);
     EXTRA_SCALE_WINDOW.store(raw_handle, Ordering::Release);
 }
@@ -96,7 +96,9 @@ mod extra_scale_tests {
         assert_eq!(extra_scale_for(Some(0x1234)), 1.2);
         assert_eq!(extra_scale_for(Some(0x5678)), 1.0);
         assert_eq!(extra_scale_for(None), 1.0);
-        for invalid in [0.5, f32::NAN, f32::INFINITY] {
+        set_window_extra_scale(0x1234, 0.8);
+        assert_eq!(extra_scale_for(Some(0x1234)), 0.8, "可以缩小");
+        for invalid in [0.2, 4.0, f32::NAN, f32::INFINITY] {
             set_window_extra_scale(0x1234, invalid);
             assert_eq!(extra_scale_for(Some(0x1234)), 1.0);
         }

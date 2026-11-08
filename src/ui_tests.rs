@@ -43,14 +43,17 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
 }
 
 #[test]
-fn ui_scale_saves_only_offered_sizes(){
+fn ui_scale_saves_only_values_in_range(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
     let directory=crate::model::config_dir();
     std::fs::create_dir_all(&directory).unwrap();
     let mut settings=crate::model::Settings::load();
     settings.ui_scale=120;settings.save().unwrap();
     assert_eq!(crate::model::Settings::load().ui_scale,120);
-    for invalid in ["135","90","abc",""] {
+    // 拖动边缘可以设成 80%–200% 之间的任意值，范围外和非数字按 100% 处理。
+    settings.ui_scale=137;settings.save().unwrap();
+    assert_eq!(crate::model::Settings::load().ui_scale,137);
+    for invalid in ["79","201","abc",""] {
         std::fs::write(directory.join("settings.txt"),format!("pet=0\nui_scale={invalid}\n")).unwrap();
         let loaded=crate::model::Settings::load();
         assert_eq!(loaded.ui_scale,100,"非可选值 {invalid:?} 回到 100%");
@@ -322,6 +325,8 @@ mod mail_preview_tests;
 mod screenshot_capture_tests;
 #[path = "screenshot_ui_tests.rs"]
 mod screenshot_ui_tests;
+#[path = "island_polish_ui_tests.rs"]
+mod island_polish_tests;
 
 struct H {
     ctx: egui::Context,
@@ -1049,8 +1054,9 @@ fn island_lyrics_center_segments_in_a_fixed_height(){
             egui::Shape::Text(text) if !text.galley.text().is_empty() && line.contains(text.galley.text())=>Some(text),_=>None,
         }).expect("岛上应显示当前歌词的一段");
         let center=text.pos.x+text.galley.rect.center().x;
-        let offset=if h.app.pet_enabled(){24.0}else{0.0};
-        assert!((center-WIN_W/2.0-offset).abs()<1.5,"歌词应在内容区居中");
+        // 歌词在封面与右侧播放控制按钮之间居中：比整条歌词岛的中心偏左 17 点（控制区比封面宽 34 点）。
+        let offset=if h.app.pet_enabled(){24.0}else{0.0}-17.0;
+        assert!((center-WIN_W/2.0-offset).abs()<1.5,"歌词应在封面与播放控制之间居中");
         assert!(!text.galley.elided,"显示段应完整显示");
         assert_eq!(text.galley.rows.len(),1,"每次只显示一段歌词");
         assert!((h.hit.height()-(crate::app::BAR_H+4.0)).abs()<0.1,"岛应保持固定高度");
@@ -1875,7 +1881,8 @@ fn mascot_and_album_share_the_single_line_lyric_island(){
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(r) if r.brush.as_ref().is_some_and(|b|b.fill_texture_id==texture))),"专辑封面不能被岛仔替代");
     let text=h.shapes.iter().find_map(|s|match &s.shape {egui::Shape::Text(t) if t.galley.text()=="晚风吹过了山岗"=>Some(t),_=>None}).unwrap();
     assert_eq!(text.galley.rows.len(),1,"保留单行歌词");
-    assert!((text.pos.x+text.galley.rect.center().x-WIN_W/2.0-24.0).abs()<1.5,"歌词在封面和岛仔右侧居中");
+    // 歌词在封面、岛仔与右侧播放控制按钮之间居中（控制区比封面宽 34 点，中心偏左 17 点）。
+    assert!((text.pos.x+text.galley.rect.center().x-WIN_W/2.0-24.0+17.0).abs()<1.5,"歌词在封面和岛仔右侧、播放控制左侧居中");
     assert!(h.shapes.iter().filter(|s|matches!(&s.shape,egui::Shape::Path(p) if p.points.len()==13 && (2.79..=3.61).contains(&p.stroke.width))).count()>=2);
 }
 

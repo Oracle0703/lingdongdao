@@ -27,7 +27,11 @@ pub(crate) const CALENDAR_H: f32 = 216.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
 pub(crate) const HUD_W: f32 = 260.0;
+/// 收起时歌词岛的默认宽度（不含吉祥物和专注计时）：封面、歌词和右侧的上一首 / 播放 / 下一首。
 pub(crate) const LYRIC_BAR_W: f32 = 300.0;
+/// 歌词岛右侧三个播放控制按钮占用的宽度，以及左侧封面占用的宽度。
+const LYRIC_CONTROLS_W: f32 = 74.0;
+const LYRIC_ART_W: f32 = 40.0;
 pub(crate) const HUD_TRACK_X: f32 = 48.0;
 pub(crate) const HUD_TRACK_W: f32 = 150.0;
 pub const BAR_W_MIN: f32 = 44.0; // 极简小条
@@ -71,6 +75,8 @@ mod mail_regressions;
 mod mail_preview;
 #[path = "screenshot_preview.rs"]
 mod screenshot_preview;
+#[path = "island_resize.rs"]
+mod island_resize;
 
 pub struct Options {
     /// 是否联网查歌词（录制/测试时关掉）。
@@ -103,6 +109,8 @@ pub struct Env {
     pub network: Option<bool>,
     /// 光标位置（与 `frame` 传入的 `win` 同一坐标系）；不在窗口附近时为 None。
     pub cursor: Option<Pos2>,
+    /// 光标的屏幕物理像素坐标；拖动缩放时用它计算（缩放会改变逻辑坐标）。没有时退回逻辑坐标。
+    pub cursor_px: Option<(f32, f32)>,
     pub idle_seconds: Option<f64>,
     /// 前台浏览器的顶部是否与岛重叠；岛仔自身窗口或暂不可读时为 None。
     pub browser_at_top: Option<bool>,
@@ -185,6 +193,8 @@ pub struct FrameOut {
     pub expanded: bool,
     pub editing: bool,
     pub animating: bool,
+    /// 岛正在形变（展开、收起、悬停胀大、切页）。外壳据此按屏幕合成节奏出帧，且形变途中不缩小原生区域。
+    pub morphing: bool,
     pub repaint_after: std::time::Duration,
     pub cmds: Vec<Cmd>,
 }
@@ -472,6 +482,8 @@ pub struct App {
     pub(crate) salary: crate::salary_ui::State,
     /// 截图图库与截图后的自动预览。
     pub(crate) shots: crate::screenshot_ui::Gallery,
+    /// 正在拖动岛的边缘调整大小。
+    pub(crate) resize: Option<island_resize::Resize>,
 }
 
 impl App {
@@ -577,6 +589,7 @@ impl App {
             resident: Default::default(), resident_power:(None,false),
             salary: crate::salary_ui::State::load(),
             shots: Default::default(),
+            resize: None,
         }
     }
 
@@ -1223,7 +1236,7 @@ impl App {
             } else {""};
         let ink=if current.is_some(){theme::WHITE}else{theme::GRAY};
         let layout=|text:String| {
-            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,LYRIC_BAR_W-80.0);
+            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,self.lyric_text_width());
             job.halign=egui::Align::Center;
             job.wrap.break_anywhere=true;
             ctx.fonts(|fonts|fonts.layout_job(job))
@@ -1248,7 +1261,20 @@ impl App {
     pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.effective_minimal()}
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
-    fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
+    fn lyric_bar_width(&self)->f32 {self.lyric_width()+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
+    /// 歌词岛本身的宽度：用户拖动设定的值，否则用默认值。
+    pub(crate) fn lyric_width(&self)->f32 {
+        if self.settings.lyric_width>0 {f32::from(self.settings.lyric_width)} else {LYRIC_BAR_W}
+    }
+    fn lyric_text_width(&self)->f32 {(self.lyric_width()-LYRIC_ART_W-LYRIC_CONTROLS_W).max(60.0)}
+    /// 收起的歌词岛上播放控制按钮所在的区域（窗口坐标）；悬停在这里不展开岛。
+    pub(crate) fn lyric_controls_rect(&self,cx:f32,top:f32)->Option<Rect> {
+        if !self.island_lyrics_active() || self.open || self.notice.as_ref().is_some_and(|_|!self.compact_notices()) {return None;}
+        let content_width=self.lyric_bar_width()-self.lyric_focus_space();
+        let width=self.w.pos.max(content_width);
+        let right=cx-width/2.0+content_width;
+        Some(Rect::from_min_max(Pos2::new(right-LYRIC_CONTROLS_W,top),Pos2::new(right-2.0,top+BAR_H)))
+    }
     fn notice_size(&self,a:&Alert)->(f32,f32) {
         let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)
@@ -1282,7 +1308,7 @@ impl App {
         } else if self.effective_minimal()&&self.t>=self.notification_bell_until {
             (BAR_W_MIN, BAR_H_MIN)
         } else {
-            (self.resident.target.width, BAR_H)
+            (self.resident.target.width.max(f32::from(self.settings.pill_width)), BAR_H)
         }
     }
 
@@ -1407,6 +1433,10 @@ impl App {
         let p_prev = self.progress();
         let hit = self.hit_rect(cx, top, p_prev);
         let inside = !self.screenshot_capturing && env.cursor.is_some_and(|c| hit.contains(c));
+        // 收起的歌词岛上，光标在播放控制按钮上时不展开，方便直接点。
+        let on_lyric_controls = self.lyric_controls_rect(cx,top).zip(env.cursor).is_some_and(|(rect,c)|rect.contains(c));
+        // 收起时光标在可拖动的边缘上：不展开，方便按住拖宽。
+        let on_resize_edge = !self.open && self.resize_hover(cx,top,env.cursor);
         let on_notice=env.cursor.is_some_and(|c|self.notice_rect(cx,top).is_some_and(|r|r.contains(c))||self.notice_details_rect(cx,top).is_some_and(|r|r.contains(c)));
         if !inside {
             self.hover_lock = false;
@@ -1476,7 +1506,7 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = !self.screenshot_capturing && (self.shots.preview.is_some() || self.mail.preview.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open));
+        let want = !self.screenshot_capturing && (self.shots.preview.is_some() || self.mail.preview.is_some() || (inside && !on_lyric_controls && !on_resize_edge && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || (self.open && self.resize.is_some()) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open));
         // 悬停在收起的工资金额上展开时，直接打开工资页。
         let salary_hover=!self.open && self.salary_bar_visible()
             && env.cursor.is_some_and(|c|(c.x-(cx+self.resident.position(bar::SALARY))).abs()<=bar::SALARY_WIDTH/2.0+6.0 && c.y-top<=BAR_H+4.0);
@@ -1582,10 +1612,14 @@ impl App {
         if self.task_dialog.is_some() && reveal>0.9 {self.task_editor_inputs(ui,origin,&mut cmds);}
         if self.calendar.draft.is_some() && reveal>0.9 {self.calendar_editor_inputs(ui,origin,&mut cmds);}
 
+        // 边缘拖动放在页面绘制之后，优先于页面里靠边的控件。
+        self.resize_input(ui,cx,top,env);
+
         // ---------- 输出 ----------
         let rel = |r: Rect| r.translate(-win.min.to_vec2());
         let mut region = if p > 0.02 || self.open {
-            let height=self.expanded_height().max(self.h.pos)*1.08+16.0;
+            // 展开时约 5% 的回弹由 8% 余量覆盖，区域不随每帧的高度变化；切页时的较大高度差才跟随。
+            let height=self.expanded_height().max(self.h.pos/1.06)*1.08+16.0;
             Rect::from_center_size(Pos2::new(cx, top + height/2.0), Vec2::new(PW + FLARE * 2.0 + 56.0, height))
         } else {
             let (bw, bh) = self.base_size();
@@ -1650,6 +1684,7 @@ impl App {
             expanded: self.open,
             editing: !self.screenshot_capturing && self.is_editing(),
             animating,
+            morphing: transitioning,
             repaint_after,
             cmds,
         }
@@ -1769,9 +1804,25 @@ impl App {
             let index=lyric.map_or(0,|(index,_)|index);
             let shown=c.ui.ctx().animate_value_with_time(egui::Id::new(("island-lyric-line",&self.ly.key)),index as f32,0.18);
             let fade=1.0-(index as f32-shown).abs().min(1.0);
-            let position=c.pos(left+content_width-LYRIC_BAR_W/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
+            let right=left+content_width;
+            let text_center=right-LYRIC_CONTROLS_W-self.lyric_text_width()/2.0;
+            let position=c.pos(text_center,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
             c.painter.galley(position,galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
-            paint::playback_bars(&c,left+content_width-21.0,center_y,self.t,self.media.playing,theme::WHITE);
+            // 上一首 / 播放暂停 / 下一首：收起时也能直接控制，悬停这里不会展开岛。
+            let playing=c.ui.ctx().animate_bool_with_time(egui::Id::new("island-lyric-playing"),self.media.playing,0.16);
+            for (index,(dx,transport)) in [(-62.0,Transport::Prev),(-40.0,Transport::Toggle),(-18.0,Transport::Next)].into_iter().enumerate() {
+                let x=right+dx;
+                let response=c.hit(x-11.0,center_y-13.0,22.0,26.0,("island-lyric-control",index));
+                let (hover,press)=c.hover_t(&response);
+                if hover>0.01 {c.circle(x,center_y,10.0-press,Color32::from_white_alpha((hover*36.0) as u8));}
+                let icon=c.scaled(x,center_y,0.62*(1.0-press*0.08));
+                match transport {
+                    Transport::Toggle=>paint::play_pause(&icon,x,center_y,15.0,playing,theme::WHITE),
+                    Transport::Prev=>paint::skip(&icon,x,center_y,-1.0,theme::WHITE),
+                    _=>paint::skip(&icon,x,center_y,1.0,theme::WHITE),
+                }
+                if response.clicked() {self.pending.push(Cmd::Media(transport));}
+            }
             if self.pomo.running {
                 let alpha=smoothstep(0.88,1.0,(width-content_width)/self.lyric_focus_space());
                 crate::focus_bar::draw(&c.faded(alpha),left+width-14.0-crate::focus_bar::LYRIC_WIDTH/2.0,center_y,self.t,&self.pomo,self.phase_secs(self.pomo.phase),true);

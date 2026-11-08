@@ -153,7 +153,16 @@ pub struct Settings {
     pub screenshot_dir: String,
     /// 截图快捷键预设的键名，取值见 `SCREENSHOT_HOTKEYS`。
     pub screenshot_hotkey: String,
+    /// 用户拖动设定的收起宽度（逻辑点）；0 表示自动。普通药丸与歌词岛分别记住。
+    pub pill_width: u16,
+    pub lyric_width: u16,
 }
+
+/// 收起宽度的可调范围（逻辑点）。药丸的下限是它实际内容的宽度。
+pub const COLLAPSED_WIDTH_MAX: u16 = 600;
+pub const LYRIC_WIDTH_MIN: u16 = 260;
+/// 岛的大小（百分比）的可调范围；设置页的预设见 `UI_SCALES`，拖动可以设成范围内的任意值。
+pub const UI_SCALE_RANGE: std::ops::RangeInclusive<u16> = 80..=200;
 
 /// 截图快捷键预设：（设置中的键名，显示文字）。托盘按键名注册，见 `tray::ScreenshotHotkey`。
 pub const SCREENSHOT_HOTKEYS: [(&str, &str); 5] = [("alt_a", "Alt + A"), ("alt_s", "Alt + S"), ("ctrl_alt_a", "Ctrl + Alt + A"), ("f1", "F1"), ("off", "关闭")];
@@ -163,7 +172,7 @@ pub const UI_SCALES: [u16; 6] = [100, 110, 120, 130, 140, 150];
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false,true], page_order: std::array::from_fn(|page| page), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, ui_scale: 100, screenshot_dir: String::new(), screenshot_hotkey: "alt_a".into() }
+        Self { load_error: None, display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false,true], page_order: std::array::from_fn(|page| page), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, music_source:String::new(), lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, ui_scale: 100, screenshot_dir: String::new(), screenshot_hotkey: "alt_a".into(), pill_width: 0, lyric_width: 0 }
     }
 }
 
@@ -240,7 +249,9 @@ impl Settings {
                 "mail_ics" => s.mail_ics = match v.parse::<u32>().unwrap_or(15) { 5 => 5, 30 => 30, _ => 15 },
                 "calendar_prompt" => s.calendar_prompt = v != "0",
                 "calendar_auto_sync" => s.calendar_auto_sync = v != "0",
-                "ui_scale" => s.ui_scale = v.parse::<u16>().ok().filter(|v|UI_SCALES.contains(v)).unwrap_or(100),
+                "ui_scale" => s.ui_scale = v.parse::<u16>().ok().filter(|v|UI_SCALE_RANGE.contains(v)).unwrap_or(100),
+                "pill_width" => s.pill_width = v.parse::<u16>().ok().filter(|v|*v<=COLLAPSED_WIDTH_MAX).unwrap_or(0),
+                "lyric_width" => s.lyric_width = v.parse::<u16>().ok().filter(|v|*v==0 || (LYRIC_WIDTH_MIN..=COLLAPSED_WIDTH_MAX).contains(v)).unwrap_or(0),
                 "screenshot_dir" => s.screenshot_dir = v.trim().to_string(),
                 "screenshot_hotkey" if SCREENSHOT_HOTKEYS.iter().any(|(key,_)|*key==v) => s.screenshot_hotkey = v,
                 _ => {}
@@ -296,6 +307,8 @@ impl Settings {
                 ("ui_scale".into(), self.ui_scale.to_string()),
                 ("screenshot_dir".into(), self.screenshot_dir.clone()),
                 ("screenshot_hotkey".into(), self.screenshot_hotkey.clone()),
+                ("pill_width".into(), self.pill_width.to_string()),
+                ("lyric_width".into(), self.lyric_width.to_string()),
             ],
         )
     }

@@ -1016,8 +1016,17 @@ impl App {
                                 }
                             });
                             let limited=self.settings.ui_scale>self.ui_scale_max;
+                            let custom=!crate::model::UI_SCALES.contains(&self.settings.ui_scale);
                             ui.label(egui::RichText::new(if limited {format!("当前屏幕最多显示到 {}%，换到更大的屏幕后按所选大小显示。",self.ui_scale_max)}
+                                else if custom {format!("当前 {}%（拖动边缘设定）。只放大岛，设置和邮件等窗口保持原大小。",self.settings.ui_scale)}
                                 else {"只放大岛，设置和邮件等窗口保持原大小。".to_string()}).size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.horizontal_wrapped(|ui|{
+                                ui.label(egui::RichText::new("也可以直接拖动岛的左右边缘：收起时调宽度，展开后调大小；双击边缘恢复默认。").size(11.0).color(ui.visuals().weak_text_color()));
+                                let resized=self.settings.ui_scale!=100||self.settings.pill_width!=0||self.settings.lyric_width!=0;
+                                if ui.add_enabled(resized,egui::Button::new("恢复默认大小")).clicked() {
+                                    self.settings.ui_scale=100;self.settings.pill_width=0;self.settings.lyric_width=0;
+                                }
+                            });
                             ui.separator();
                             ui.horizontal(|ui|{
                                 ui.add_sized([56.0,30.0],egui::Label::new("时间制式"));
