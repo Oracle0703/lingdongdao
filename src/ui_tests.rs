@@ -28,8 +28,8 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
         crate::model::Settings::load().save().unwrap();
         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
         for line in legacy.lines(){
-            // 新增的工资页追加在末尾，且保持关闭；其他旧设置原样保留。
-            let line=match line {"visible_pages=10111111"=>"visible_pages=1011111101","page_order=5,2,0,1,3,4,6,7"=>"page_order=5,2,0,1,3,4,6,7,8,9",line=>line};
+            // 新增的工资页追加在末尾且保持关闭，截图页、沙漏页、系统页默认打开；其他旧设置原样保留。
+            let line=match line {"visible_pages=10111111"=>"visible_pages=101111110111","page_order=5,2,0,1,3,4,6,7"=>"page_order=5,2,0,1,3,4,6,7,8,9,10,11",line=>line};
             assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");
         }
     }
@@ -43,14 +43,17 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
 }
 
 #[test]
-fn ui_scale_saves_only_offered_sizes(){
+fn ui_scale_saves_only_values_in_range(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
     let directory=crate::model::config_dir();
     std::fs::create_dir_all(&directory).unwrap();
     let mut settings=crate::model::Settings::load();
     settings.ui_scale=120;settings.save().unwrap();
     assert_eq!(crate::model::Settings::load().ui_scale,120);
-    for invalid in ["135","90","abc",""] {
+    // 拖动边缘可以设成 80%–200% 之间的任意值，范围外和非数字按 100% 处理。
+    settings.ui_scale=137;settings.save().unwrap();
+    assert_eq!(crate::model::Settings::load().ui_scale,137);
+    for invalid in ["79","201","abc",""] {
         std::fs::write(directory.join("settings.txt"),format!("pet=0\nui_scale={invalid}\n")).unwrap();
         let loaded=crate::model::Settings::load();
         assert_eq!(loaded.ui_scale,100,"非可选值 {invalid:?} 回到 100%");
@@ -322,6 +325,12 @@ mod mail_preview_tests;
 mod screenshot_capture_tests;
 #[path = "screenshot_ui_tests.rs"]
 mod screenshot_ui_tests;
+#[path = "island_polish_ui_tests.rs"]
+mod island_polish_tests;
+#[path = "hourglass_ui_tests.rs"]
+mod hourglass_tests;
+#[path = "perf_ui_tests.rs"]
+mod perf_tests;
 
 struct H {
     ctx: egui::Context,
@@ -1049,8 +1058,9 @@ fn island_lyrics_center_segments_in_a_fixed_height(){
             egui::Shape::Text(text) if !text.galley.text().is_empty() && line.contains(text.galley.text())=>Some(text),_=>None,
         }).expect("岛上应显示当前歌词的一段");
         let center=text.pos.x+text.galley.rect.center().x;
-        let offset=if h.app.pet_enabled(){24.0}else{0.0};
-        assert!((center-WIN_W/2.0-offset).abs()<1.5,"歌词应在内容区居中");
+        // 歌词在封面与右侧播放控制按钮之间居中：比整条歌词岛的中心偏左 17 点（控制区比封面宽 34 点）。
+        let offset=if h.app.pet_enabled(){24.0}else{0.0}-17.0;
+        assert!((center-WIN_W/2.0-offset).abs()<1.5,"歌词应在封面与播放控制之间居中");
         assert!(!text.galley.elided,"显示段应完整显示");
         assert_eq!(text.galley.rows.len(),1,"每次只显示一段歌词");
         assert!((h.hit.height()-(crate::app::BAR_H+4.0)).abs()<0.1,"岛应保持固定高度");
@@ -1316,8 +1326,8 @@ fn wheel_navigation_reaches_every_page_in_both_directions(){
     h.app.shelf.items.clear();h.app.todos.items.clear();
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     h.hover(H::local(210.0,18.0),0.3);
-    // 默认可见：除工资页外的 9 页，截图页排在最后。
-    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,9,0]),(40.0,[9,7,6,5,4,3,2,1,0])] {
+    // 默认可见：除工资页外的 11 页，截图页、沙漏页、系统页排在最后。
+    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,9,10,11,0]),(40.0,[11,10,9,7,6,5,4,3,2,1,0])] {
         for page in pages {
             h.wheel(delta);
             assert_eq!(h.app.page,page,"滚轮翻页不能被空的置物架或待办卡住");
@@ -1357,10 +1367,14 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
 #[test]
 fn navigation_wraps_between_visible_pages_and_notification_settings_remain_accessible() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,crate::app::SCREENSHOT_PAGE);
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,crate::app::SYSTEM_PAGE);
+    h.hover(H::local(300.0,60.0),0.8);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,crate::app::HOURGLASS_PAGE);
+    h.hover(H::local(300.0,60.0),0.8);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,crate::app::SCREENSHOT_PAGE);
     // 截图页不画翻页箭头（左右箭头用来切换截图）；用标题行滚轮或页码豆翻页。
     h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,68.0));assert_eq!(h.app.page,crate::app::SCREENSHOT_PAGE);
-    h.hover(H::local(210.0,18.0),0.3);h.wheel(-40.0);assert_eq!(h.app.page,0);
+    h.hover(H::local(210.0,18.0),0.3);h.wheel(-40.0);assert_eq!(h.app.page,crate::app::HOURGLASS_PAGE);
+    h.hover(H::local(210.0,18.0),0.25);h.wheel(-40.0);assert_eq!(h.app.page,crate::app::SYSTEM_PAGE);
+    h.hover(H::local(210.0,18.0),0.25);h.wheel(-40.0);assert_eq!(h.app.page,0);
     h.app.open_settings_category(3);assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,6);
 }
 
@@ -1509,7 +1523,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true,true,true,true,true,true,true,true,false,true],"工资页默认关闭，截图页默认打开");
+    assert_eq!(h.app.settings.visible_pages,[true,true,true,true,true,true,true,true,false,true,true,true],"工资页默认关闭，截图页、沙漏页、系统页默认打开");
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -1517,23 +1531,23 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save().unwrap();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,false,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,false,true,true,true]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
     assert!(!restarted.settings.show_battery);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,false,true],"旧配置没有截图页时，新增的截图页默认打开");
+    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,false,true,true,true],"旧配置没有截图页、沙漏页时，新增的页面默认打开");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,false,true],"旧版页面开关应保留，并开启新增的日程页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,false,true,true,true],"旧版页面开关应保留，并开启新增的日程页");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=11111111\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false,true],"旧版配置升级后工资页保持关闭");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false,true,true,true],"旧版配置升级后工资页保持关闭");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000001\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,true,true]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,true,true,true,true]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=0000000010\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,true,false],"新版配置可以关闭截图页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,true,false,true,true],"新版配置可以关闭截图页");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false,true]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false,true,true,true]);
 }
 
 #[test]
@@ -1573,7 +1587,7 @@ fn battery_module_can_disable_only_the_power_warning() {
 fn page_visibility_skips_hidden_pages_in_every_navigation_control() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    for page in [1,3,4,6,7,crate::app::SCREENSHOT_PAGE] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,crate::app::SCREENSHOT_PAGE,crate::app::HOURGLASS_PAGE,crate::app::SYSTEM_PAGE] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [2,5,0] {
         h.click(H::local(398.0,68.0));
@@ -1602,7 +1616,7 @@ fn page_visibility_moves_away_from_hidden_page_and_keeps_one_page() {
     h.app.set_page_visible(4,false);
     assert_eq!(h.app.page,0);
     assert!(!h.app.is_editing());
-    for page in [0,1,3,5,6,7,crate::app::SCREENSHOT_PAGE] {h.app.set_page_visible(page,false);}
+    for page in [0,1,3,5,6,7,crate::app::SCREENSHOT_PAGE,crate::app::HOURGLASS_PAGE,crate::app::SYSTEM_PAGE] {h.app.set_page_visible(page,false);}
     assert_eq!(h.app.page,2);
     h.app.set_page_visible(2,false);
     assert!(h.app.settings.visible_pages[2],"不能关闭最后一个页面");
@@ -1851,6 +1865,8 @@ fn mascot_rest_and_focus_have_distinct_states(){
 #[test]
 fn mascot_stays_beside_the_clock_and_all_resident_components(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    // 满排布时加上岛仔会让系统监控让位；这里只看岛仔自己的位置。
+    h.app.settings.system_island=false;
     h.app.settings.pet=false;h.power=(Some(80),true);h.quota_accounts(5);
     h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),playing:true,duration:120.0,..Default::default()};
     h.app.pomo.running=true;h.app.pomo.remaining=1200.0;
@@ -1875,7 +1891,8 @@ fn mascot_and_album_share_the_single_line_lyric_island(){
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(r) if r.brush.as_ref().is_some_and(|b|b.fill_texture_id==texture))),"专辑封面不能被岛仔替代");
     let text=h.shapes.iter().find_map(|s|match &s.shape {egui::Shape::Text(t) if t.galley.text()=="晚风吹过了山岗"=>Some(t),_=>None}).unwrap();
     assert_eq!(text.galley.rows.len(),1,"保留单行歌词");
-    assert!((text.pos.x+text.galley.rect.center().x-WIN_W/2.0-24.0).abs()<1.5,"歌词在封面和岛仔右侧居中");
+    // 歌词在封面、岛仔与右侧播放控制按钮之间居中（控制区比封面宽 34 点，中心偏左 17 点）。
+    assert!((text.pos.x+text.galley.rect.center().x-WIN_W/2.0-24.0+17.0).abs()<1.5,"歌词在封面和岛仔右侧、播放控制左侧居中");
     assert!(h.shapes.iter().filter(|s|matches!(&s.shape,egui::Shape::Path(p) if p.points.len()==13 && (2.79..=3.61).contains(&p.stroke.width))).count()>=2);
 }
 
@@ -3596,13 +3613,13 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9];
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9,10,11];
     h.app.settings.save().unwrap();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8,9]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8,9,10,11]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
-    for page in [1,3,4,6,7,crate::app::SCREENSHOT_PAGE] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,crate::app::SCREENSHOT_PAGE,crate::app::HOURGLASS_PAGE,crate::app::SYSTEM_PAGE] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [5,2,0] {
         h.click(H::local(398.0,68.0));
@@ -3615,12 +3632,12 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,5);
     for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","0,0,1,2,3,4,5,6,7","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8,9]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8,9,10,11]);
     }
     std::fs::write(crate::model::config_dir().join("settings.txt"),"page_order=5,2,0,1,3,4,6,7\n").unwrap();
-    assert_eq!(crate::model::Settings::load().page_order,[5,2,0,1,3,4,6,7,8,9],"旧版 8 页排序升级后工资页、截图页依次排在最后");
+    assert_eq!(crate::model::Settings::load().page_order,[5,2,0,1,3,4,6,7,8,9,10,11],"旧版 8 页排序升级后工资页、截图页、沙漏页依次排在最后");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"page_order=8,5,2,0,1,3,4,6,7\n").unwrap();
-    assert_eq!(crate::model::Settings::load().page_order,[8,5,2,0,1,3,4,6,7,9],"旧版 9 页排序升级后截图页排在最后");
+    assert_eq!(crate::model::Settings::load().page_order,[8,5,2,0,1,3,4,6,7,9,10,11],"旧版 9 页排序升级后截图页、沙漏页排在最后");
 }
 
 #[test]
@@ -3646,9 +3663,9 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8,9]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8,9,10,11]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8,9]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8,9,10,11]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }
 
@@ -4947,9 +4964,11 @@ fn salary_repaints_stay_aligned_with_the_wall_clock() {
 fn legacy_resident_order_gains_the_salary_component_when_loaded() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
     std::fs::write(crate::model::config_dir().join("settings.txt"),"resident_order=7,6,2,0,9,1\n").unwrap();
-    assert_eq!(crate::model::Settings::load().resident_order,vec![7,6,2,0,9,1,crate::bar_layout::SALARY]);
+    assert_eq!(crate::model::Settings::load().resident_order,vec![7,6,2,0,9,1,crate::bar_layout::SYSTEM,crate::bar_layout::SALARY],"补上工资，系统监控插在电量后面");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"resident_order=7,6,2,0,9,1,10\n").unwrap();
-    assert_eq!(crate::model::Settings::load().resident_order,vec![7,6,2,0,9,1,10]);
+    assert_eq!(crate::model::Settings::load().resident_order,vec![7,6,2,0,9,1,11,10]);
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"resident_order=7,6,2,11,0,9,1,10\n").unwrap();
+    assert_eq!(crate::model::Settings::load().resident_order,vec![7,6,2,11,0,9,1,10],"新版排列原样读取");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"resident_order=7,7,2,0,9,1\n").unwrap();
     assert!(crate::model::Settings::load().resident_order.is_empty(),"无效排列回到默认");
 }

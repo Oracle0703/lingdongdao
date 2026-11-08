@@ -43,6 +43,16 @@ fn inside_hit(x: i32, y: i32) -> bool {
     hit().lock().unwrap_or_else(|e|e.into_inner()).iter().any(|&(l,t,r,b)|x>=l&&x<r&&y>=t&&y<b)
 }
 
+/// 原生区域的更新策略：`SetWindowRgn` 会让系统重新合成整个窗口，每帧调用会让动画卡顿。
+/// 形变途中只扩大（取并集）、不缩小；形变结束后再一次缩到目标大小。返回 `None` 表示不用改。
+fn next_region(current:(i32,i32,i32,i32),wanted:(i32,i32,i32,i32),morphing:bool)->Option<(i32,i32,i32,i32)> {
+    if current==wanted {return None;}
+    if !morphing || current==(0,0,0,0) {return Some(wanted);}
+    let covered=current.0<=wanted.0 && current.1<=wanted.1 && current.2>=wanted.2 && current.3>=wanted.3;
+    if covered {return None;}
+    Some((current.0.min(wanted.0),current.1.min(wanted.1),current.2.max(wanted.2),current.3.max(wanted.3)))
+}
+
 fn file_drag_region(region:(i32,i32,i32,i32),zone:Option<(i32,i32,i32,i32)>,capture:bool)->(i32,i32,i32,i32){
     match zone.filter(|_|capture) {
         Some(zone)=>(region.0.min(zone.0),region.1.min(zone.1),region.2.max(zone.2),region.3.max(zone.3)),
@@ -274,6 +284,7 @@ impl Window {
         ppp: f32,
         editing: bool,
         expanded: bool,
+        morphing: bool,
     ) {
         let px = |v: f32| (v * ppp).round() as i32;
         let r = (px(region.0), px(region.1), px(region.0 + region.2), px(region.1 + region.3));
@@ -294,7 +305,7 @@ impl Window {
         let mut hits=vec![h];
         if let Some((x,y,w,h))=notice_hit {hits.push((px(x),px(y),px(x+w),px(y+h)));}
         *hit().lock().unwrap_or_else(|e| e.into_inner()) = hits;
-        if self.region != r {
+        if let Some(r) = next_region(self.region, r, morphing) {
             unsafe {
                 let rgn = CreateRectRgn(r.0, r.1, r.2, r.3);
                 if SetWindowRgn(self.hwnd, rgn, true) != 0 {
@@ -325,6 +336,18 @@ impl Drop for Window {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn region_only_grows_while_morphing_and_shrinks_once_settled() {
+        let small=(100,0,300,40);let large=(50,0,350,300);let taller=(50,0,350,320);
+        assert_eq!(next_region((0,0,0,0),small,true),Some(small),"首次直接设置");
+        assert_eq!(next_region(small,large,true),Some(large),"展开时立即扩大");
+        assert_eq!(next_region(large,(60,0,340,280),true),None,"形变途中较小的区域不缩");
+        assert_eq!(next_region(large,taller,true),Some(taller),"回弹超出时取并集扩大");
+        assert_eq!(next_region(taller,(40,0,300,310),true),Some((40,0,350,320)),"部分超出时取并集");
+        assert_eq!(next_region(taller,small,false),Some(small),"形变结束后一次缩到目标");
+        assert_eq!(next_region(small,small,false),None);
+    }
 
     #[test]
     fn drag_capture_ignores_clicks_and_pointer_jitter() {
@@ -371,7 +394,7 @@ mod tests {
             let foreground=GetForegroundWindow();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
             let mut native=Window{hwnd:island.0,screenshot_capturing:false,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default()};
-            let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,1.0,false,expanded);
+            let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,1.0,false,expanded,false);
             update(&mut native,true);
             assert!(above(island.0,cover.0),"展开时必须重新抬高实际窗口层级，不能只检查置顶标记");
             assert_eq!(GetForegroundWindow(),foreground,"悬停展开不能抢走当前应用的输入焦点");

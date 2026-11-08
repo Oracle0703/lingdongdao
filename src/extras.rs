@@ -118,6 +118,7 @@ fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
             crate::calendar_ui::source_icon(c,source,x-14.0,y-14.0,28.0);
         },
         "专注计时"=>crate::paint::stopwatch(&c.scaled(x,y,0.65),x,y,8.0,0.0,theme::RED_TOP),
+        "沙漏时间到"=>crate::hourglass::alert_icon(c,x,y),
         _=>crate::paint::bell(&c.scaled(x,y,1.7),x,y,theme::GRAY,0.0),
     }
 }
@@ -922,6 +923,8 @@ impl App {
                         settings_card(ui,|ui|{
                             setting_row(ui,"电量","本机电量、充电状态与提醒；无电池设备自动隐藏",&mut self.settings.show_battery);
                             ui.separator();
+                            setting_row(ui,"系统监控","收起时显示 CPU、内存占用圆环；展开「系统」页看百分比和网速",&mut self.settings.system_island);
+                            ui.separator();
                             setting_row(ui,"岛上歌词","收起时显示正在唱的那一句",&mut self.settings.island_lyrics);
                         });
                         settings_label(ui,"功能页面");
@@ -1016,8 +1019,17 @@ impl App {
                                 }
                             });
                             let limited=self.settings.ui_scale>self.ui_scale_max;
+                            let custom=!crate::model::UI_SCALES.contains(&self.settings.ui_scale);
                             ui.label(egui::RichText::new(if limited {format!("当前屏幕最多显示到 {}%，换到更大的屏幕后按所选大小显示。",self.ui_scale_max)}
+                                else if custom {format!("当前 {}%（拖动边缘设定）。只放大岛，设置和邮件等窗口保持原大小。",self.settings.ui_scale)}
                                 else {"只放大岛，设置和邮件等窗口保持原大小。".to_string()}).size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.horizontal_wrapped(|ui|{
+                                ui.label(egui::RichText::new("也可以直接拖动岛的左右边缘：收起时调宽度，展开后调大小；双击边缘恢复默认。").size(11.0).color(ui.visuals().weak_text_color()));
+                                let resized=self.settings.ui_scale!=100||self.settings.pill_width!=0||self.settings.lyric_width!=0;
+                                if ui.add_enabled(resized,egui::Button::new("恢复默认大小")).clicked() {
+                                    self.settings.ui_scale=100;self.settings.pill_width=0;self.settings.lyric_width=0;
+                                }
+                            });
                             ui.separator();
                             ui.horizontal(|ui|{
                                 ui.add_sized([56.0,30.0],egui::Label::new("时间制式"));
@@ -1089,6 +1101,12 @@ impl App {
                             setting_number(ui,"休息",&mut self.settings.rest_minutes,1,60," 分钟",1.0);
                             ui.add_space(3.0);
                             ui.small("调整后从下一阶段开始生效。");
+                        });
+                        settings_label(ui,"沙漏");
+                        settings_card(ui,|ui|{
+                            setting_number(ui,"一轮时长",&mut self.settings.hourglass_minutes,1,crate::hourglass::MINUTES_MAX," 分钟",1.0);
+                            ui.add_space(3.0);
+                            ui.small("岛上「沙漏」页也能直接选时长；正在流的沙漏从下一轮开始生效。");
                         });
                     }
                     3=>{

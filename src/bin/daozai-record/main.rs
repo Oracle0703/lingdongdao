@@ -437,6 +437,7 @@ fn main() {
             t,
             clock: format!("{:02}:{:02}", total / 3600, total / 60 % 60),
             clock_ms: 0,
+            cursor_px: None,
             today: "2026-10-28".into(),
             date: "10月28日 周三".into(),
             battery: Some(76),

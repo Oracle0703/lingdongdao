@@ -11,16 +11,24 @@ pub(crate) const BELL: usize = 8;
 pub(crate) const PET: usize = 9;
 pub(crate) const SALARY: usize = 10;
 pub(crate) const SALARY_WIDTH: f32 = 62.0;
-const SLOTS: usize = 11;
-const WIDTHS: [f32; SLOTS] = [44.0,20.0,27.0,27.0,27.0,22.0,14.0,crate::focus_bar::WIDTH,20.0,32.0,SALARY_WIDTH];
+/// 系统监控（CPU、内存两个圆环）。
+pub(crate) const SYSTEM: usize = 11;
+const SLOTS: usize = 12;
+const WIDTHS: [f32; SLOTS] = [44.0,20.0,27.0,27.0,27.0,22.0,14.0,crate::focus_bar::WIDTH,20.0,32.0,SALARY_WIDTH,crate::perf_ui::WIDTH];
 
-pub(crate) const DEFAULT_ORDER: [usize;7]=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS,SALARY];
+pub(crate) const DEFAULT_ORDER: [usize;8]=[BATTERY,SYSTEM,PET,CLOCK,QUOTA,MUSIC,FOCUS,SALARY];
+/// 没有电池时的默认排列（与 `Layout::new` 一致）。
+pub(crate) const NO_BATTERY_ORDER: [usize;8]=[QUOTA,PET,CLOCK,SYSTEM,BATTERY,MUSIC,FOCUS,SALARY];
 pub(crate) fn valid_order(order:&[usize])->bool {
     order.len()==DEFAULT_ORDER.len() && DEFAULT_ORDER.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1)
 }
-/// 读取保存的排列；旧版没有工资组件的 6 项排列在末尾补上工资。
+/// 读取保存的排列：旧版没有工资组件的排列在末尾补上工资；没有系统监控的排列把它插在电量后面（与默认排列一致）。
 pub(crate) fn migrate_order(mut order:Vec<usize>)->Option<Vec<usize>> {
-    if order.len()==DEFAULT_ORDER.len()-1 && !order.contains(&SALARY) {order.push(SALARY);}
+    if order.len()==DEFAULT_ORDER.len()-2 && !order.contains(&SALARY) && !order.contains(&SYSTEM) {order.push(SALARY);}
+    if order.len()==DEFAULT_ORDER.len()-1 && !order.contains(&SYSTEM) {
+        let at=order.iter().position(|slot|*slot==BATTERY).map_or(order.len(),|index|index+1);
+        order.insert(at,SYSTEM);
+    }
     valid_order(&order).then_some(order)
 }
 
@@ -34,6 +42,7 @@ pub(crate) struct Parts {
     pub bell: bool,
     pub pet: bool,
     pub salary: bool,
+    pub system: bool,
 }
 
 pub(crate) fn animations_enabled()->bool {
@@ -57,14 +66,16 @@ pub(crate) struct Layout {
 
 impl Layout {
     pub fn new(parts:Parts)->Self {
-        let Parts{battery,quotas,music,focus,bell,pet,salary}=parts;
+        let Parts{battery,quotas,music,focus,bell,pet,salary,system}=parts;
         fn place(cursor:&mut f32,width:f32)->f32 {let x=*cursor+width/2.0;*cursor+=width+12.0;x}
         let mut x=[None;SLOTS];let mut cursor=16.0;
         let count=quotas.min(3);
-        let order=if battery {[BATTERY,CLOCK,QUOTA]}else{[QUOTA,CLOCK,BATTERY]};
+        // 有电池：电量、系统监控在最左；没有电池：额度移到最左，系统监控跟在时钟后面。
+        let order=if battery {[BATTERY,SYSTEM,CLOCK,QUOTA]}else{[QUOTA,CLOCK,SYSTEM,BATTERY]};
         for slot in order {
             match slot {
                 BATTERY if battery=>x[slot]=Some(place(&mut cursor,WIDTHS[slot])),
+                SYSTEM if system=>x[slot]=Some(place(&mut cursor,WIDTHS[slot])),
                 CLOCK=>{
                     if pet {x[PET]=Some(place(&mut cursor,WIDTHS[PET]));}
                     x[slot]=Some(place(&mut cursor,WIDTHS[slot]));
@@ -85,16 +96,18 @@ impl Layout {
         for value in x.iter_mut().flatten() {*value-=width/2.0;}
         Self {width:width.max(96.0),x}
     }
-    /// 岛上实际使用的排布。工资组件优先级最低：最终宽度超过 `limit` 时让位，其他组件位置不变。
+    /// 岛上实际使用的排布。最终宽度超过 `limit` 时先让掉工资组件，仍放不下再让掉系统监控，其他组件位置不变。
     pub fn fitted(parts:Parts,order:&[usize],clock_extra:f32,limit:f32)->Self {
-        let build=|salary:bool|{
-            let mut layout=Self::new(Parts{salary,..parts});
+        let build=|salary:bool,system:bool|{
+            let mut layout=Self::new(Parts{salary,system,..parts});
             layout.reorder(order);
             if clock_extra>0.0 {layout.widen_clock(clock_extra);}
             layout
         };
-        let layout=build(parts.salary);
-        if parts.salary && layout.width>limit {build(false)}else{layout}
+        let mut layout=build(parts.salary,parts.system);
+        if parts.salary && layout.width>limit {layout=build(false,parts.system);}
+        if parts.system && layout.width>limit {layout=build(false,false);}
+        layout
     }
     pub fn widen_clock(&mut self, extra:f32) {
         let clock=self.x[CLOCK].unwrap();
@@ -160,7 +173,8 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn parts(battery:bool,quotas:usize,music:bool,focus:bool,bell:bool,pet:bool,salary:bool)->Parts {Parts{battery,quotas,music,focus,bell,pet,salary}}
+    fn parts(battery:bool,quotas:usize,music:bool,focus:bool,bell:bool,pet:bool,salary:bool)->Parts {Parts{battery,quotas,music,focus,bell,pet,salary,system:false}}
+    const CUSTOM:[usize;8]=[FOCUS,SALARY,MUSIC,QUOTA,CLOCK,SYSTEM,PET,BATTERY];
     fn boxes(layout:&Layout,clock_extra:f32)->Vec<(f32,f32)> {
         let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|{
             let width=WIDTHS[i]+if i==CLOCK {clock_extra}else{0.0};
@@ -171,15 +185,15 @@ mod tests {
     }
     #[test]
     fn clock_12h_keeps_components_separate_in_custom_orders(){
-        for order in [DEFAULT_ORDER,[FOCUS,SALARY,MUSIC,QUOTA,CLOCK,PET,BATTERY]] {
-            for quotas in 0..=5 {for salary in [false,true] {
-                let mut layout=Layout::new(parts(true,quotas,true,true,false,true,salary));
+        for order in [DEFAULT_ORDER,NO_BATTERY_ORDER,CUSTOM] {
+            for quotas in 0..=5 {for salary in [false,true] {for system in [false,true] {
+                let mut layout=Layout::new(Parts{system,..parts(true,quotas,true,true,false,true,salary)});
                 layout.reorder(&order);layout.widen_clock(40.0);
                 let boxes=boxes(&layout,40.0);
                 assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9));
                 assert!(boxes.first().unwrap().0>=-layout.width/2.0+15.9);
                 assert!(boxes.last().unwrap().1<=layout.width/2.0-15.9);
-            }}
+            }}}
         }
     }
     #[test]
@@ -187,29 +201,33 @@ mod tests {
         assert!(!valid_order(&[0,0,2,6,7,9,10]));
         assert!(!valid_order(&[0,1,2]));
         assert!(!valid_order(&[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS]),"缺少工资组件的旧排列需要先迁移");
-        let order=[FOCUS,SALARY,MUSIC,QUOTA,CLOCK,PET,BATTERY];
-        for battery in [false,true]{for count in 0..=5 {for salary in [false,true] {
-            let mut layout=Layout::new(parts(battery,count,true,true,false,true,salary));
+        assert!(!valid_order(&[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS,SALARY]),"缺少系统监控的旧排列需要先迁移");
+        let order=CUSTOM;
+        for battery in [false,true]{for count in 0..=5 {for salary in [false,true] {for system in [false,true] {
+            let mut layout=Layout::new(Parts{system,..parts(battery,count,true,true,false,true,salary)});
             let width=layout.width;layout.reorder(&order);
             assert_eq!(layout.width,width);
             let positions:Vec<_>=order.iter().filter_map(|i|layout.x[*i]).collect();
             assert!(positions.windows(2).all(|p|p[0]<p[1]));
             if count>1 {assert_eq!(layout.x[QUOTA+1].unwrap()-layout.x[QUOTA].unwrap(),34.0);}
             assert!(boxes(&layout,0.0).windows(2).all(|p|p[1].0-p[0].1>=6.9));
-        }}}
+        }}}}
     }
     #[test]
     fn saved_orders_from_before_the_salary_component_gain_it_at_the_end(){
-        assert_eq!(migrate_order(vec![FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]),Some(vec![FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY,SALARY]));
-        assert_eq!(migrate_order(vec![SALARY,FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]),Some(vec![SALARY,FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]));
+        assert_eq!(migrate_order(vec![FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]),Some(vec![FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY,SYSTEM,SALARY]));
+        assert_eq!(migrate_order(vec![SALARY,FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]),Some(vec![SALARY,FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY,SYSTEM]));
+        assert_eq!(migrate_order(vec![BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS,SALARY]),Some(DEFAULT_ORDER.to_vec()),"系统监控插在电量后面，与默认排列一致");
+        assert_eq!(migrate_order(vec![QUOTA,PET,CLOCK,BATTERY,MUSIC,FOCUS,SALARY]),Some(vec![QUOTA,PET,CLOCK,BATTERY,SYSTEM,MUSIC,FOCUS,SALARY]));
+        assert_eq!(migrate_order(CUSTOM.to_vec()),Some(CUSTOM.to_vec()),"新版排列原样保留");
         assert_eq!(migrate_order(vec![FOCUS,FOCUS,QUOTA,CLOCK,PET,BATTERY]),None);
         assert_eq!(migrate_order(vec![FOCUS,SALARY,QUOTA,CLOCK,PET,BATTERY]),None);
         assert_eq!(migrate_order(vec![]),None);
     }
     #[test]
     fn every_component_combination_fits_without_overlaps(){
-        for quotas in 0..=8 {for battery in [false,true] {for music in [false,true] {for focus in [false,true] {for bell in [false,true] {for pet in [false,true] {for salary in [false,true] {
-            let wanted=parts(battery,quotas,music,focus,bell,pet,salary);
+        for quotas in 0..=8 {for battery in [false,true] {for music in [false,true] {for focus in [false,true] {for bell in [false,true] {for pet in [false,true] {for salary in [false,true] {for system in [false,true] {
+            let wanted=Parts{system,..parts(battery,quotas,music,focus,bell,pet,salary)};
             let layout=Layout::fitted(wanted,&[],0.0,crate::app::PW);
             let boxes=boxes(&layout,0.0);
             assert!(layout.width<=crate::app::PW);
@@ -219,10 +237,16 @@ mod tests {
             assert_eq!(layout.clearance(CLOCK),1.0);
             if salary && layout.x[SALARY].is_none() {
                 assert!(Layout::new(wanted).width>crate::app::PW,"放得下时不能让掉工资组件");
-                assert_eq!(layout.x,Layout::new(Parts{salary:false,..wanted}).x,"工资组件让位后其他组件保持原位");
+                if layout.x[SYSTEM].is_some()==system {assert_eq!(layout.x,Layout::new(Parts{salary:false,..wanted}).x,"工资组件让位后其他组件保持原位");}
             }
-            if salary && quotas==0 {assert!(layout.x[SALARY].is_some(),"常见组合必须能显示工资：{wanted:?}");}
-        }}}}}}}
+            if system && layout.x[SYSTEM].is_none() {
+                assert!(layout.x[SALARY].is_none(),"先让掉工资组件，再让系统监控");
+                assert!(Layout::new(Parts{salary:false,..wanted}).width>crate::app::PW,"放得下时不能让掉系统监控");
+                assert_eq!(layout.x,Layout::new(Parts{salary:false,system:false,..wanted}).x,"系统监控让位后其他组件保持原位");
+            }
+            if system && quotas<=1 {assert!(layout.x[SYSTEM].is_some(),"常见组合必须能显示系统监控：{wanted:?}");}
+            if salary && !system && quotas==0 {assert!(layout.x[SALARY].is_some(),"常见组合必须能显示工资：{wanted:?}");}
+        }}}}}}}}
     }
     #[test]
     fn salary_yields_when_the_12_hour_clock_needs_the_room(){

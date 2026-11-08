@@ -27,7 +27,11 @@ pub(crate) const CALENDAR_H: f32 = 216.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
 pub(crate) const HUD_W: f32 = 260.0;
+/// 收起时歌词岛的默认宽度（不含吉祥物和专注计时）：封面、歌词和右侧的上一首 / 播放 / 下一首。
 pub(crate) const LYRIC_BAR_W: f32 = 300.0;
+/// 歌词岛右侧三个播放控制按钮占用的宽度，以及左侧封面占用的宽度。
+const LYRIC_CONTROLS_W: f32 = 74.0;
+const LYRIC_ART_W: f32 = 40.0;
 pub(crate) const HUD_TRACK_X: f32 = 48.0;
 pub(crate) const HUD_TRACK_W: f32 = 150.0;
 pub const BAR_W_MIN: f32 = 44.0; // 极简小条
@@ -40,13 +44,15 @@ pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整
 pub const WIN_H: f32 = 270.0;
 pub(crate) const SALARY_PAGE: usize = 8;
 /// 功能页数量。新增页面时改这里，并补齐下面三个数组和 `Settings` 的默认值（数组长度不符会编译失败）。
-pub(crate) const PAGE_COUNT: usize = 10;
+pub(crate) const PAGE_COUNT: usize = 12;
 pub const SCREENSHOT_PAGE: usize = 9;
-pub(crate) const PAGE_NAMES: [&str; PAGE_COUNT] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "工资", "截图"];
+pub(crate) const HOURGLASS_PAGE: usize = 10;
+pub(crate) const SYSTEM_PAGE: usize = 11;
+pub(crate) const PAGE_NAMES: [&str; PAGE_COUNT] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "工资", "截图", "沙漏", "系统"];
 /// 各页面齿轮对应的设置分组。
-pub(crate) const PAGE_SETTINGS_TABS: [usize; PAGE_COUNT] = [1, 2, 3, 5, 4, 7, 11, 8, crate::salary_ui::SETTINGS_TAB, crate::screenshot_ui::SETTINGS_TAB];
+pub(crate) const PAGE_SETTINGS_TABS: [usize; PAGE_COUNT] = [1, 2, 3, 5, 4, 7, 11, 8, crate::salary_ui::SETTINGS_TAB, crate::screenshot_ui::SETTINGS_TAB, 2, 10];
 /// 设置 → 功能页面里每页的说明。
-pub(crate) const PAGE_DESCRIPTIONS: [&str; PAGE_COUNT] = ["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","按月薪实时计算今日收入","区域截图、历史浏览与复制拖出"];
+pub(crate) const PAGE_DESCRIPTIONS: [&str; PAGE_COUNT] = ["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","按月薪实时计算今日收入","区域截图、历史浏览与复制拖出","翻转开始的沙漏倒计时","CPU、内存占用与实时网速"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -71,6 +77,8 @@ mod mail_regressions;
 mod mail_preview;
 #[path = "screenshot_preview.rs"]
 mod screenshot_preview;
+#[path = "island_resize.rs"]
+mod island_resize;
 
 pub struct Options {
     /// 是否联网查歌词（录制/测试时关掉）。
@@ -103,6 +111,8 @@ pub struct Env {
     pub network: Option<bool>,
     /// 光标位置（与 `frame` 传入的 `win` 同一坐标系）；不在窗口附近时为 None。
     pub cursor: Option<Pos2>,
+    /// 光标的屏幕物理像素坐标；拖动缩放时用它计算（缩放会改变逻辑坐标）。没有时退回逻辑坐标。
+    pub cursor_px: Option<(f32, f32)>,
     pub idle_seconds: Option<f64>,
     /// 前台浏览器的顶部是否与岛重叠；岛仔自身窗口或暂不可读时为 None。
     pub browser_at_top: Option<bool>,
@@ -185,6 +195,8 @@ pub struct FrameOut {
     pub expanded: bool,
     pub editing: bool,
     pub animating: bool,
+    /// 岛正在形变（展开、收起、悬停胀大、切页）。外壳据此按屏幕合成节奏出帧，且形变途中不缩小原生区域。
+    pub morphing: bool,
     pub repaint_after: std::time::Duration,
     pub cmds: Vec<Cmd>,
 }
@@ -472,6 +484,12 @@ pub struct App {
     pub(crate) salary: crate::salary_ui::State,
     /// 截图图库与截图后的自动预览。
     pub(crate) shots: crate::screenshot_ui::Gallery,
+    /// 正在拖动岛的边缘调整大小。
+    pub(crate) resize: Option<island_resize::Resize>,
+    /// 沙漏页的倒计时。
+    pub(crate) hourglass: crate::hourglass::State,
+    /// 系统监控的最新采样与最近一分钟的走势。
+    pub(crate) perf: crate::perf_ui::State,
 }
 
 impl App {
@@ -491,6 +509,7 @@ impl App {
         digests.set_enabled(llm_config.enabled && llm_config.mail_digest);
         let (bw, bh) = if settings.minimal { (BAR_W_MIN, BAR_H_MIN) } else { (BAR_W, BAR_H) };
         let focus_seconds=settings.focus_minutes as f32*60.0;
+        let hourglass_minutes=settings.hourglass_minutes;
         let initial_lyrics=settings.lyrics_enabled;
         let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
         Self {
@@ -577,6 +596,9 @@ impl App {
             resident: Default::default(), resident_power:(None,false),
             salary: crate::salary_ui::State::load(),
             shots: Default::default(),
+            resize: None,
+            hourglass: crate::hourglass::State::new(hourglass_minutes),
+            perf: Default::default(),
         }
     }
 
@@ -1191,7 +1213,7 @@ impl App {
         self.todo_input_focused=false;
     }
 
-    fn island_lyrics_active(&self)->bool {
+    pub(crate) fn island_lyrics_active(&self)->bool {
         self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
             && !self.browser_minimal_active
             && self.ly.key==format!("{}|{}|{:.0}",self.media.title,self.media.artist,self.media.duration)
@@ -1223,7 +1245,7 @@ impl App {
             } else {""};
         let ink=if current.is_some(){theme::WHITE}else{theme::GRAY};
         let layout=|text:String| {
-            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,LYRIC_BAR_W-80.0);
+            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,self.lyric_text_width());
             job.halign=egui::Align::Center;
             job.wrap.break_anywhere=true;
             ctx.fonts(|fonts|fonts.layout_job(job))
@@ -1244,11 +1266,31 @@ impl App {
         self.island_lyric_layout=Some(galley);
     }
 
-    fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active}
+    pub(crate) fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active}
     pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.effective_minimal()}
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
-    fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
-    fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
+    fn lyric_focus_space(&self)->f32 {if self.timer_on_island(){crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
+    /// 收起时岛上是否显示计时组件（番茄钟或沙漏在计时）。
+    fn timer_on_island(&self)->bool {self.pomo.running||self.hourglass.running}
+    /// 岛上的计时组件：沙漏和番茄钟共用一个位置，同时计时时显示先结束的那个。
+    fn draw_island_timer(&self,c:&Card,cx:f32,cy:f32,compact:bool) {
+        if self.hourglass_on_island() {crate::hourglass::draw_bar(c,cx,cy,self.t,&self.hourglass,compact);}
+        else {crate::focus_bar::draw(c,cx,cy,self.t,&self.pomo,self.phase_secs(self.pomo.phase),compact);}
+    }
+    fn lyric_bar_width(&self)->f32 {self.lyric_width()+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
+    /// 歌词岛本身的宽度：用户拖动设定的值，否则用默认值。
+    pub(crate) fn lyric_width(&self)->f32 {
+        if self.settings.lyric_width>0 {f32::from(self.settings.lyric_width)} else {LYRIC_BAR_W}
+    }
+    fn lyric_text_width(&self)->f32 {(self.lyric_width()-LYRIC_ART_W-LYRIC_CONTROLS_W).max(60.0)}
+    /// 收起的歌词岛上播放控制按钮所在的区域（窗口坐标）；悬停在这里不展开岛。
+    pub(crate) fn lyric_controls_rect(&self,cx:f32,top:f32)->Option<Rect> {
+        if !self.island_lyrics_active() || self.open || self.notice.as_ref().is_some_and(|_|!self.compact_notices()) {return None;}
+        let content_width=self.lyric_bar_width()-self.lyric_focus_space();
+        let width=self.w.pos.max(content_width);
+        let right=cx-width/2.0+content_width;
+        Some(Rect::from_min_max(Pos2::new(right-LYRIC_CONTROLS_W,top),Pos2::new(right-2.0,top+BAR_H)))
+    }
     fn notice_size(&self,a:&Alert)->(f32,f32) {
         let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)
@@ -1282,7 +1324,7 @@ impl App {
         } else if self.effective_minimal()&&self.t>=self.notification_bell_until {
             (BAR_W_MIN, BAR_H_MIN)
         } else {
-            (self.resident.target.width, BAR_H)
+            (self.resident.target.width.max(f32::from(self.settings.pill_width)), BAR_H)
         }
     }
 
@@ -1361,7 +1403,7 @@ impl App {
         self.update_media(env,&ctx);
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
-        let parts=bar::Parts{battery:self.settings.show_battery&&env.battery.is_some(),quotas:self.quota_bar_indices().len(),music:self.media.is_music()&&!bell,focus:self.pomo.running,bell,pet:self.pet_enabled(),salary:self.salary_on_island()};
+        let parts=bar::Parts{battery:self.settings.show_battery&&env.battery.is_some(),quotas:self.quota_bar_indices().len(),music:self.media.is_music()&&!bell,focus:self.timer_on_island(),bell,pet:self.pet_enabled(),salary:self.salary_on_island(),system:self.settings.system_island};
         let mut layout=Layout::fitted(parts,&self.settings.resident_order,if self.settings.clock_period!=0 {40.0}else{0.0},PW);
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
@@ -1407,6 +1449,10 @@ impl App {
         let p_prev = self.progress();
         let hit = self.hit_rect(cx, top, p_prev);
         let inside = !self.screenshot_capturing && env.cursor.is_some_and(|c| hit.contains(c));
+        // 收起的歌词岛上，光标在播放控制按钮上时不展开，方便直接点。
+        let on_lyric_controls = self.lyric_controls_rect(cx,top).zip(env.cursor).is_some_and(|(rect,c)|rect.contains(c));
+        // 收起时光标在可拖动的边缘上：不展开，方便按住拖宽。
+        let on_resize_edge = !self.open && self.resize_hover(cx,top,env.cursor);
         let on_notice=env.cursor.is_some_and(|c|self.notice_rect(cx,top).is_some_and(|r|r.contains(c))||self.notice_details_rect(cx,top).is_some_and(|r|r.contains(c)));
         if !inside {
             self.hover_lock = false;
@@ -1476,13 +1522,17 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = !self.screenshot_capturing && (self.shots.preview.is_some() || self.mail.preview.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open));
+        let want = !self.screenshot_capturing && (self.shots.preview.is_some() || self.mail.preview.is_some() || (inside && !on_lyric_controls && !on_resize_edge && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || (self.open && self.resize.is_some()) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open));
         // 悬停在收起的工资金额上展开时，直接打开工资页。
         let salary_hover=!self.open && self.salary_bar_visible()
             && env.cursor.is_some_and(|c|(c.x-(cx+self.resident.position(bar::SALARY))).abs()<=bar::SALARY_WIDTH/2.0+6.0 && c.y-top<=BAR_H+4.0);
+        // 悬停在收起的系统监控圆环上展开时，直接打开系统页。
+        let system_hover=!self.open && self.system_bar_visible()
+            && env.cursor.is_some_and(|c|(c.x-(cx+self.resident.position(bar::SYSTEM))).abs()<=crate::perf_ui::WIDTH/2.0+6.0 && c.y-top<=BAR_H+4.0);
         let was_open=self.open;
         self.morph(want, inside, env.t, dt);
         if salary_hover && !was_open && self.open && !self.drag_hot {self.jump_page(SALARY_PAGE);}
+        if system_hover && !was_open && self.open && !self.drag_hot {self.jump_page(SYSTEM_PAGE);}
         self.update_pet(env, cx);
 
         // ---------- 绘制 ----------
@@ -1582,10 +1632,14 @@ impl App {
         if self.task_dialog.is_some() && reveal>0.9 {self.task_editor_inputs(ui,origin,&mut cmds);}
         if self.calendar.draft.is_some() && reveal>0.9 {self.calendar_editor_inputs(ui,origin,&mut cmds);}
 
+        // 边缘拖动放在页面绘制之后，优先于页面里靠边的控件。
+        self.resize_input(ui,cx,top,env);
+
         // ---------- 输出 ----------
         let rel = |r: Rect| r.translate(-win.min.to_vec2());
         let mut region = if p > 0.02 || self.open {
-            let height=self.expanded_height().max(self.h.pos)*1.08+16.0;
+            // 展开时约 5% 的回弹由 8% 余量覆盖，区域不随每帧的高度变化；切页时的较大高度差才跟随。
+            let height=self.expanded_height().max(self.h.pos/1.06)*1.08+16.0;
             Rect::from_center_size(Pos2::new(cx, top + height/2.0), Vec2::new(PW + FLARE * 2.0 + 56.0, height))
         } else {
             let (bw, bh) = self.base_size();
@@ -1622,6 +1676,7 @@ impl App {
         let salary_visible=if self.open {self.page==SALARY_PAGE}else{!minimal_pill && self.salary_bar_visible()};
         let ambient=self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
             || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
+            || self.hourglass.running && (self.open && self.page==HOURGLASS_PAGE || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
             || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some())
             || salary_visible && self.salary_animating(self.open);
         let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping;
@@ -1629,6 +1684,10 @@ impl App {
         let mut repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
         // 上班中金额可见时，对齐系统时钟的下一次跳秒，保证金额每秒都更新。
         if let Some(wait)=self.salary_next_tick(salary_visible) {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64(wait));}
+        // 沙漏翻转的半圈按 60 帧画。
+        let flipping=self.open && self.page==HOURGLASS_PAGE && self.hourglass.flipping(self.t);
+        if flipping {repaint_after=repaint_after.min(std::time::Duration::from_secs_f64(1.0/60.0));}
+        let animating=animating || flipping;
         if let Some(preview)=&self.shots.preview {
             // 倒计时每秒刷新；悬停后离开要在离开缓冲（0.12 秒）内收起，所以悬停期间多刷新几次。
             let wait=match preview.until {Some(until)=>(until-self.t).fract().max(0.02),None=>0.05};
@@ -1650,6 +1709,7 @@ impl App {
             expanded: self.open,
             editing: !self.screenshot_capturing && self.is_editing(),
             animating,
+            morphing: transitioning,
             repaint_after,
             cmds,
         }
@@ -1769,12 +1829,28 @@ impl App {
             let index=lyric.map_or(0,|(index,_)|index);
             let shown=c.ui.ctx().animate_value_with_time(egui::Id::new(("island-lyric-line",&self.ly.key)),index as f32,0.18);
             let fade=1.0-(index as f32-shown).abs().min(1.0);
-            let position=c.pos(left+content_width-LYRIC_BAR_W/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
+            let right=left+content_width;
+            let text_center=right-LYRIC_CONTROLS_W-self.lyric_text_width()/2.0;
+            let position=c.pos(text_center,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
             c.painter.galley(position,galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
-            paint::playback_bars(&c,left+content_width-21.0,center_y,self.t,self.media.playing,theme::WHITE);
-            if self.pomo.running {
+            // 上一首 / 播放暂停 / 下一首：收起时也能直接控制，悬停这里不会展开岛。
+            let playing=c.ui.ctx().animate_bool_with_time(egui::Id::new("island-lyric-playing"),self.media.playing,0.16);
+            for (index,(dx,transport)) in [(-62.0,Transport::Prev),(-40.0,Transport::Toggle),(-18.0,Transport::Next)].into_iter().enumerate() {
+                let x=right+dx;
+                let response=c.hit(x-11.0,center_y-13.0,22.0,26.0,("island-lyric-control",index));
+                let (hover,press)=c.hover_t(&response);
+                if hover>0.01 {c.circle(x,center_y,10.0-press,Color32::from_white_alpha((hover*36.0) as u8));}
+                let icon=c.scaled(x,center_y,0.62*(1.0-press*0.08));
+                match transport {
+                    Transport::Toggle=>paint::play_pause(&icon,x,center_y,15.0,playing,theme::WHITE),
+                    Transport::Prev=>paint::skip(&icon,x,center_y,-1.0,theme::WHITE),
+                    _=>paint::skip(&icon,x,center_y,1.0,theme::WHITE),
+                }
+                if response.clicked() {self.pending.push(Cmd::Media(transport));}
+            }
+            if self.timer_on_island() {
                 let alpha=smoothstep(0.88,1.0,(width-content_width)/self.lyric_focus_space());
-                crate::focus_bar::draw(&c.faded(alpha),left+width-14.0-crate::focus_bar::LYRIC_WIDTH/2.0,center_y,self.t,&self.pomo,self.phase_secs(self.pomo.phase),true);
+                self.draw_island_timer(&c.faded(alpha),left+width-14.0-crate::focus_bar::LYRIC_WIDTH/2.0,center_y,true);
             }
         }
         if lyric_alpha>=0.997 {return;}
@@ -1835,13 +1911,18 @@ impl App {
             let c=base.faded(compact_alpha);let c=if compact_alpha<0.8{c.ghost()}else{c};
             self.draw_quota_bar(&c,local_cx,&layout);
         }
-        if self.pomo.running && compact_alpha>0.004 {
-            crate::focus_bar::draw(&base.faded(compact_alpha),local_cx+layout.x[bar::FOCUS].unwrap(),15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false);
+        if self.timer_on_island() && compact_alpha>0.004 {
+            self.draw_island_timer(&base.faded(compact_alpha),local_cx+layout.x[bar::FOCUS].unwrap(),15.0,false);
         }
         if let Some(x)=layout.x[bar::SALARY].filter(|_|compact_alpha>0.004) {
             let alpha=compact_alpha*layout.pet_clearance(bar::SALARY);
             let c=base.faded(alpha);let c=if alpha<0.8{c.ghost()}else{c};
             self.draw_salary_bar(&c,local_cx+x);
+        }
+        if let Some(x)=layout.x[bar::SYSTEM].filter(|_|compact_alpha>0.004) {
+            let alpha=compact_alpha*layout.pet_clearance(bar::SYSTEM);
+            let c=base.faded(alpha);let c=if alpha<0.8{c.ghost()}else{c};
+            crate::perf_ui::draw_bar(&c,local_cx+x,15.0,self.perf.latest.as_ref());
         }
     }
 
@@ -1921,6 +2002,8 @@ impl App {
             6 => ("AI", "额度", theme::SOFT_GREEN),
             SALARY_PAGE => ("今日", "工资", theme::YELLOW),
             SCREENSHOT_PAGE => ("截图", "", theme::WHITE),
+            HOURGLASS_PAGE => ("沙漏", "计时", crate::hourglass::SAND),
+            SYSTEM_PAGE => ("系统", "监控", crate::perf_ui::CPU_INK),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -1983,6 +2066,8 @@ impl App {
             CALENDAR_PAGE => self.page_calendar(c,env),
             SALARY_PAGE => self.page_salary(c),
             SCREENSHOT_PAGE => self.page_screenshot(c, env, cmds),
+            HOURGLASS_PAGE => self.page_hourglass(c),
+            SYSTEM_PAGE => self.page_system(c),
             _ => self.page_settings(c),
         }
     }
@@ -2034,6 +2119,8 @@ impl App {
                 self.alert("专注计时", format!("该{}了", next.label()), 1, true);
             }
         }
+        self.tick_hourglass(elapsed);
+        self.tick_perf();
         self.ring_shown.target = (self.pomo.remaining / self.phase_secs(self.pomo.phase)).clamp(0.0, 1.0);
         self.ring_shown.step(dt);
         self.reset_spin.step(dt);
